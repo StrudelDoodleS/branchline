@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 /**
  * Unit tests for TranscriptParser's subagent lifecycle and model detection.
  *
@@ -14,6 +15,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { TranscriptParser, TranscriptParserDelegate, parseTaskNotification } from '../src/transcript-parser'
 import { AgentEvent, WatchedSession } from '../src/protocol'
+import { claudeContextPayload } from '../src/claude-context'
 
 const SESSION_ID = 'session-1'
 
@@ -55,7 +57,7 @@ function setup() {
     elapsed: () => 0,
     getSession: (id) => (id === SESSION_ID ? session : undefined),
     fireSessionLifecycle: () => {},
-    emitContextUpdate: () => {},
+    emitContextUpdate: (agentName, current) => events.push({ time: 0, type: 'context_update', payload: claudeContextPayload(current, agentName) }),
   }
   const parser = new TranscriptParser(delegate)
   const feed = (entry: unknown, agent = 'orchestrator') => parser.processTranscriptLine(
@@ -101,6 +103,91 @@ function taskNotification(toolUseId: string, status = 'completed', result = 'Fou
 }
 
 const ofType = (events: AgentEvent[], type: string) => events.filter(e => e.type === type)
+
+describe('Claude context usage', () => {
+  const response = (id: string, input: number, cached: number, created: number, output: number) => ({
+    type: 'assistant', uuid: id,
+    message: { role: 'assistant', model: 'claude-opus-5-5', content: [{ type: 'text', text: 'Response' }],
+      usage: { input_tokens: input, cache_read_input_tokens: cached, cache_creation_input_tokens: created, output_tokens: output } },
+  })
+
+  it('uses the latest response including cached tokens and permits compaction to lower usage', () => {
+    const { feed, session, events } = setup()
+    session.contextBreakdown.toolResults = 4_000_000
+    feed(response('before-compaction', 2, 221456, 382, 526))
+    assert.equal(session.contextTokensByAgent?.get('orchestrator'), 222366)
+    feed(response('after-compaction', 100, 20000, 5000, 200))
+    assert.equal(session.contextTokensByAgent?.get('orchestrator'), 25300)
+    const emitted = ofType(events, 'context_update').filter(event => event.payload.agent === 'orchestrator').at(-1)!.payload
+    assert.equal(emitted.tokens, 25300)
+    assert.ok(Math.abs(Object.values(emitted.breakdown as Record<string, number>).reduce((sum, value) => sum + value, 0) - 25300) < 0.01)
+    feed(response('child', 2, 6000, 800, 100), 'Reviewer')
+    assert.equal(session.contextTokensByAgent?.get('Reviewer'), 6902)
+    assert.equal(session.contextTokensByAgent?.get('orchestrator'), 25300)
+  })
+
+  it('restores the latest context usage when attaching to an existing transcript', () => {
+    const { parser, session } = setup()
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-flow-context-'))
+    const file = path.join(directory, 'session.jsonl')
+    fs.writeFileSync(file, [response('old', 100, 800000, 50000, 5000), response('current', 2, 200000, 10000, 1000)].map(entry => JSON.stringify(entry)).join('\n') + '\n')
+    try {
+      parser.prescanExistingContent(file, fs.statSync(file).size, session)
+      assert.equal(session.contextTokensByAgent?.get('orchestrator'), 211002)
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('ignores replayed older responses while allowing the current response to finish streaming', () => {
+    const { feed, session } = setup()
+    const old = response('old-response', 100, 800000, 10000, 200)
+    feed(old)
+    feed(response('new-response', 100, 20000, 5000, 200))
+    feed(old)
+    assert.equal(session.contextTokensByAgent?.get('orchestrator'), 25300)
+    feed(response('new-response', 100, 20000, 5000, 300))
+    assert.equal(session.contextTokensByAgent?.get('orchestrator'), 25400)
+    feed(response('new-response', 100, 20000, 5000, 100))
+    assert.equal(session.contextTokensByAgent?.get('orchestrator'), 25400)
+  })
+
+  it('ignores replayed responses during prescan too', () => {
+    const { parser, session } = setup()
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-flow-context-replay-'))
+    const file = path.join(directory, 'session.jsonl')
+    const old = response('old-response', 100, 800000, 10000, 200)
+    fs.writeFileSync(file, [old, response('current-response', 100, 20000, 5000, 200), old].map(entry => JSON.stringify(entry)).join('\n') + '\n')
+    try {
+      parser.prescanExistingContent(file, fs.statSync(file).size, session)
+      assert.equal(session.contextTokensByAgent?.get('orchestrator'), 25300)
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('Claude session titles', () => {
+  it('uses the saved custom title instead of the first injected-looking message', () => {
+    const { parser, session, feed } = setup()
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-flow-title-'))
+    const file = path.join(directory, 'session.jsonl')
+    fs.writeFileSync(file, [
+      JSON.stringify({ type: 'user', message: { role: 'user', content: '/home/example/.claude/skills/start.md' } }),
+      JSON.stringify({ type: 'custom-title', customTitle: 'Inference review' }),
+    ].join('\n') + '\n')
+    session.labelSet = false
+    try {
+      const entries = parser.prescanExistingContent(file, fs.statSync(file).size, session)
+      parser.extractSessionLabel(entries, session)
+      assert.equal(session.label, 'Inference review')
+      feed({ type: 'custom-title', customTitle: 'Renamed inference review' })
+      assert.equal(session.label, 'Renamed inference review')
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+})
 
 describe('background subagents (#92)', () => {
   it('does not complete a background subagent at launch', () => {

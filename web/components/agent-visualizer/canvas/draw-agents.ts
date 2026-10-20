@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 import { Agent, NODE, ANIM } from '@/lib/agent-types'
 import { COLORS, getStateColor, contextSegments } from '@/lib/colors'
 import {
@@ -6,6 +7,7 @@ import {
 import { alphaHex, formatTokens } from '@/lib/utils'
 import { truncateText, drawHexagon, CLAUDE_SPARK_D, OPENAI_LOGO_D, OPENAI_LOGO_VIEWBOX } from './draw-misc'
 import { getAgentGlowSprite } from './render-cache'
+import { contextMeter } from '@/lib/context-meter'
 
 let _claudeSparkPath: Path2D | null = null
 export function getClaudeSparkPath() {
@@ -80,20 +82,25 @@ export function drawContextComposition(
   ctx.fillStyle = COLORS.textMuted
   ctx.font = `${CONTEXT_BAR.fontSize}px monospace`
   ctx.textAlign = 'center'
-  ctx.fillText(`${formatTokens(total)} / ${formatTokens(agent.tokensMax)} tokens`, agent.x, barY + barHeight + CONTEXT_BAR.labelPadding)
+  ctx.fillText(`${formatTokens(total)} / ${formatTokens(agent.tokensMax)}`, agent.x, barY + barHeight + CONTEXT_BAR.labelPadding, barWidth)
 
   // Segments
   const segments = contextSegments(bd)
+  const meter = contextMeter(total, agent.tokensMax, segments.map(segment => segment.value))
 
   let x = barX
-  const maxWidth = barWidth * (total / agent.tokensMax)
-
-  for (const seg of segments) {
-    if (seg.value <= 0) continue
-    const segWidth = (seg.value / total) * maxWidth
+  for (const [index, seg] of segments.entries()) {
+    const segWidth = Math.min(barWidth * meter.segments[index], Math.max(0, barX + barWidth - x))
+    if (segWidth <= 0) continue
     ctx.fillStyle = seg.color
     ctx.fillRect(x, barY, segWidth, barHeight)
     x += segWidth
+  }
+  if (x === barX && meter.fraction > 0) {
+    ctx.fillStyle = COLORS.holoBase
+    const width = barWidth * meter.fraction
+    ctx.fillRect(x, barY, width, barHeight)
+    x += width
   }
 
   // Remaining capacity
@@ -117,7 +124,9 @@ export function drawContextRing(
   const total = agent.tokensUsed
   if (total <= 0) return
 
-  const usage = total / agent.tokensMax
+  const segments = contextSegments(bd)
+  const meter = contextMeter(total, agent.tokensMax, segments.map(segment => segment.value))
+  const usage = meter.fraction
   const ringR = radius + CONTEXT_RING.ringOffset
   const ringW = CONTEXT_RING.ringWidth
   const startAngle = -Math.PI / 2
@@ -130,18 +139,23 @@ export function drawContextRing(
   ctx.stroke()
 
   // Filled segments
-  const segments = contextSegments(bd)
-
   let currentAngle = startAngle
-  for (const seg of segments) {
-    if (seg.value <= 0) continue
-    const sweep = (seg.value / agent.tokensMax) * Math.PI * 2
+  for (const [index, seg] of segments.entries()) {
+    if (meter.segments[index] <= 0) continue
+    const sweep = meter.segments[index] * Math.PI * 2
     ctx.beginPath()
     ctx.arc(agent.x, agent.y, ringR, currentAngle, currentAngle + sweep)
     ctx.strokeStyle = seg.color
     ctx.lineWidth = ringW
     ctx.stroke()
     currentAngle += sweep
+  }
+  if (currentAngle === startAngle && usage > 0) {
+    ctx.beginPath()
+    ctx.arc(agent.x, agent.y, ringR, startAngle, startAngle + usage * Math.PI * 2)
+    ctx.strokeStyle = COLORS.holoBase
+    ctx.lineWidth = ringW
+    ctx.stroke()
   }
 
   // Warning glow at high usage

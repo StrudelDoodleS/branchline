@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 import { useEffect, useRef } from "react"
 
 export function useKeyboardShortcuts(actions: {
@@ -21,7 +22,7 @@ export function useKeyboardShortcuts(actions: {
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLButtonElement) return
       const a = actionsRef.current
 
       switch (e.key) {

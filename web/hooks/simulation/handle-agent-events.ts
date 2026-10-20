@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 import {
   type Agent,
   type TimelineEntry,
@@ -15,6 +16,7 @@ export function handleAgentSpawn(
   ctx: ProcessEventContext,
 ): void {
   const name = asString(payload.name)
+  const displayName = typeof payload.displayName === 'string' ? payload.displayName : name
   const parentId = typeof payload.parent === 'string' ? payload.parent : undefined
   const isMain = asBoolean(payload.isMain)
   const task = typeof payload.task === 'string' ? payload.task : undefined
@@ -28,6 +30,7 @@ export function handleAgentSpawn(
     state.agents.set(name, {
       ...existing,
       state: 'idle',
+      ...(payload.displayName ? { name: displayName } : {}),
       ...(task ? { task } : {}),
       ...(model ? { model, tokensMax: ctx.getContextWindowSize(model) } : {}),
       ...(runtime ? { runtime } : {}),
@@ -74,7 +77,7 @@ export function handleAgentSpawn(
   }
 
   const agent: Agent = {
-    id: name, name, state: 'idle',
+    id: name, name: displayName, state: 'idle',
     parentId: parentId || null,
     tokensUsed: 0, tokensMax: ctx.getContextWindowSize(model),
     contextBreakdown: emptyContextBreakdown(),

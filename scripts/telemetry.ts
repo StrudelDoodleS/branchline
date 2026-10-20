@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 import * as fs from 'fs'
 import * as path from 'path'
 import { getOrCreateInstallId } from './telemetry/install-id'
@@ -5,19 +6,12 @@ import { sanitizeString } from './telemetry/sanitize'
 import { syncOnce } from './telemetry/sync'
 
 /**
- * Hardcoded telemetry endpoint + publishable key.
- *
- * These ship inside every published binary. No env var override, no runtime
- * fallback. All enabled installs send events to Agent Flow's Supabase project.
- * Forks that republish under a different name must edit these constants and
- * rebuild.
- *
- * Safe to commit: publishable keys are designed to be public. Postgres RLS
- * denies the anon role everything; the only write path is the telemetry-ingest
- * edge function, which runs under the secret key and validates every event.
+ * Branchline has no default telemetry collector. Tests can inject their own
+ * endpoint. A downstream maintainer must configure a collector and explicitly
+ * opt in before any telemetry state is created or events can be sent.
  */
-export const TELEMETRY_ENDPOINT = 'https://dxwtgqdkyunfhbywqmrz.supabase.co'
-export const TELEMETRY_PUBLISHABLE_KEY = 'sb_publishable_AgJ_DIUH9zm8E0yHC9KsRw_WsIv4qc8'
+export const TELEMETRY_ENDPOINT = ''
+export const TELEMETRY_PUBLISHABLE_KEY = ''
 
 /**
  * Progressive sync schedule. After init(), fire syncs at these offsets:
@@ -82,7 +76,7 @@ export interface TelemetryClient {
  * Rules:
  * - `DO_NOT_TRACK` truthy → disabled (wins over everything)
  * - `AGENT_FLOW_TELEMETRY` falsy (`false`, `0`, `disabled`, ``) → disabled
- * - Otherwise enabled (including when AGENT_FLOW_TELEMETRY is unset)
+ * - Unset → disabled; a non-falsy flag explicitly opts in
  */
 export function isTelemetryEnabled(env: NodeJS.ProcessEnv): boolean {
   const dnt = env.DO_NOT_TRACK
@@ -93,7 +87,7 @@ export function isTelemetryEnabled(env: NodeJS.ProcessEnv): boolean {
   if (flag !== undefined && FALSY_VALUES.has(flag.toLowerCase())) {
     return false
   }
-  return true
+  return flag !== undefined
 }
 
 export function createTelemetryClient(opts: TelemetryClientOptions): TelemetryClient {
@@ -114,7 +108,7 @@ export function createTelemetryClient(opts: TelemetryClientOptions): TelemetryCl
   let syncInFlight: Promise<unknown> | null = null
 
   function enabled(): boolean {
-    return isTelemetryEnabled(getEnv())
+    return isTelemetryEnabled(getEnv()) && endpoint.length > 0 && apiKey.length > 0
   }
 
   function serialize(event: TelemetryEvent): string {

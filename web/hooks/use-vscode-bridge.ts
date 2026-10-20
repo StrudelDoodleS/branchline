@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 'use client'
 
 import { useEffect, useState, useCallback, useRef } from 'react'
@@ -5,6 +6,10 @@ import { vscodeBridge, type ConnectionStatus, type AgentEvent, type SessionInfo 
 import { SimulationEvent } from '@/lib/agent-types'
 
 interface BridgeHookResult {
+  sessionReplayVersion: number
+  sessionResetVersion: number
+  loadingSessionId: string | null
+  replayError: string | null
   isVSCode: boolean
   connectionStatus: ConnectionStatus
   /** Events received from VS Code extension, converted to SimulationEvent format */
@@ -62,6 +67,60 @@ export function useVSCodeBridge(): BridgeHookResult {
    *  Prevents the animation frame from processing events in the wrong simulation context. */
   const sessionSwitchPendingRef = useRef(false)
   const [sessionsWithActivity, setSessionsWithActivity] = useState<Set<string>>(new Set())
+  const [sessionReplayVersion, setSessionReplayVersion] = useState(0)
+  const [sessionResetVersion, setSessionResetVersion] = useState(0)
+  const [loadingSessionId, setLoadingSessionId] = useState<string | null>(null)
+  const [replayError, setReplayError] = useState<string | null>(null)
+  const replayRequestRef = useRef(0)
+  const seenEventsRef = useRef<Map<string, Set<string>>>(new Map())
+  const replayFloorRef = useRef<Map<string, { streamId: string; throughEventId: number }>>(new Map())
+  const replayInFlightRef = useRef<{ sessionId: string; request: number } | null>(null)
+  const deferredStreamEventsRef = useRef<Map<string, SimulationEvent[]>>(new Map())
+
+  const requestSessionReplay = useCallback(async (sessionId: string) => {
+    if (vscodeBridge?.isVSCode || process.env.AGENT_FLOW_STANDALONE !== '1' && process.env.NODE_ENV !== 'development') return
+    const request = ++replayRequestRef.current
+    const previous = replayInFlightRef.current
+    if (previous && previous.sessionId !== sessionId) deferredStreamEventsRef.current.delete(previous.sessionId)
+    replayInFlightRef.current = { sessionId, request }
+    setLoadingSessionId(sessionId)
+    setReplayError(null)
+    try {
+      const relayPort = process.env.NEXT_PUBLIC_RELAY_PORT || ''
+      const origin = relayPort ? `http://127.0.0.1:${relayPort}` : ''
+      const response = await fetch(`${origin}/session-events?sessionId=${encodeURIComponent(sessionId)}`, { cache: 'no-store' })
+      if (!response.ok) throw new Error('Could not load this session’s recent activity.')
+      const replay = await response.json() as { events: AgentEvent[]; throughEventId: number; streamId: string }
+      if (request !== replayRequestRef.current || selectedSessionIdRef.current !== sessionId) return
+      const history: SimulationEvent[] = replay.events.map(event => ({ ...event, type: event.type as SimulationEvent['type'] }))
+      const live = [...(sessionEventsRef.current.get(sessionId) ?? []), ...(deferredStreamEventsRef.current.get(sessionId) ?? [])].filter(event =>
+        event.eventId === undefined || event.streamId === replay.streamId && event.eventId > replay.throughEventId)
+      const seen = new Set<string>()
+      const merged = [...history, ...live].filter(event => {
+        if (event.eventId === undefined) return true
+        const key = `${event.streamId}:${event.eventId}`
+        if (seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+      sessionEventsRef.current.set(sessionId, merged)
+      seenEventsRef.current.set(sessionId, seen)
+      replayFloorRef.current.set(sessionId, { streamId: replay.streamId, throughEventId: replay.throughEventId })
+      sessionSwitchPendingRef.current = true
+      pendingEventsRef.current.length = 0
+      setSessionReplayVersion(version => version + 1)
+    } catch (error) {
+      if (request === replayRequestRef.current && selectedSessionIdRef.current === sessionId) {
+        setReplayError(error instanceof Error ? error.message : 'Could not refresh session activity.')
+      }
+    } finally {
+      if (request === replayRequestRef.current) {
+        replayInFlightRef.current = null
+        deferredStreamEventsRef.current.delete(sessionId)
+        setLoadingSessionId(null)
+      }
+    }
+  }, [])
 
   // Connect to standalone dev relay server via SSE when not in VS Code
   useEffect(() => {
@@ -82,6 +141,7 @@ export function useVSCodeBridge(): BridgeHookResult {
     es.onopen = () => {
       setConnectionStatus('connected')
       setUseMockData(false)
+      if (selectedSessionIdRef.current) void requestSessionReplay(selectedSessionIdRef.current)
     }
     es.onmessage = (e) => {
       try {
@@ -96,7 +156,7 @@ export function useVSCodeBridge(): BridgeHookResult {
     return () => {
       es.close()
     }
-  }, [])
+  }, [requestSessionReplay])
 
   useEffect(() => {
     const bridge = vscodeBridge
@@ -117,8 +177,28 @@ export function useVSCodeBridge(): BridgeHookResult {
         type: event.type as SimulationEvent['type'],
         payload: event.payload,
         sessionId: event.sessionId,
+        eventId: event.eventId,
+        streamId: event.streamId,
       }
-
+      if (event.sessionId && event.eventId !== undefined) {
+        const floor = replayFloorRef.current.get(event.sessionId)
+        if (floor && floor.streamId === event.streamId && event.eventId <= floor.throughEventId) return
+        // A reconnect adopts its stream through the HTTP snapshot. A delayed
+        // event from the previous server must never select an older stream.
+        if (floor && floor.streamId !== event.streamId) {
+          if (replayInFlightRef.current?.sessionId === event.sessionId) {
+            const deferred = deferredStreamEventsRef.current.get(event.sessionId) ?? []
+            deferred.push(simEvent)
+            deferredStreamEventsRef.current.set(event.sessionId, deferred)
+          }
+          return
+        }
+        const seen = seenEventsRef.current.get(event.sessionId) ?? new Set<string>()
+        const key = `${event.streamId}:${event.eventId}`
+        if (seen.has(key)) return
+        seen.add(key)
+        seenEventsRef.current.set(event.sessionId, seen)
+      }
       // Always buffer by session (for replay on session switch)
       if (event.sessionId) {
         const buf = sessionEventsRef.current.get(event.sessionId) || []
@@ -126,7 +206,7 @@ export function useVSCodeBridge(): BridgeHookResult {
         sessionEventsRef.current.set(event.sessionId, buf)
         // Keep lastActivityTime roughly current (throttled: one state update per 5s per session)
         const now = Date.now()
-        setSessions(prev => {
+        if (!event.replayed) setSessions(prev => {
           const s = prev.find(x => x.id === event.sessionId)
           if (!s || now - s.lastActivityTime < 5000) return prev
           return prev.map(x => x.id === event.sessionId ? { ...x, lastActivityTime: now } : x)
@@ -184,6 +264,15 @@ export function useVSCodeBridge(): BridgeHookResult {
         selectedSessionIdRef.current = null
         pendingEventsRef.current.length = 0
         sessionEventsRef.current.clear()
+        seenEventsRef.current.clear()
+        replayFloorRef.current.clear()
+        replayInFlightRef.current = null
+        deferredStreamEventsRef.current.clear()
+        replayRequestRef.current++
+        setLoadingSessionId(null)
+        setReplayError(null)
+        sessionSwitchPendingRef.current = true
+        setSessionResetVersion(version => version + 1)
         setSessionsWithActivity(new Set())
         dismissedSessionsRef.current.clear()
         setEventVersion(v => v + 1)
@@ -194,18 +283,19 @@ export function useVSCodeBridge(): BridgeHookResult {
         setSessions(sessionList)
         // Auto-select: prefer active sessions, then most recently active.
         // Only set selection — useLayoutEffect handles flushing events.
-        if (!selectedSessionIdRef.current && sessionList.length > 0) {
+        if (!selectedSessionIdRef.current || !sessionList.some(session => session.id === selectedSessionIdRef.current)) {
           const sorted = [...sessionList].sort((a, b) => {
             const aActive = a.status === 'active' ? 1 : 0
             const bActive = b.status === 'active' ? 1 : 0
             if (aActive !== bActive) return bActive - aActive
             return b.lastActivityTime - a.lastActivityTime
           })
-          const autoId = sorted[0].id
+          const autoId = sorted[0]?.id ?? null
           sessionSwitchPendingRef.current = true
           pendingEventsRef.current.length = 0
           selectedSessionIdRef.current = autoId
           setSelectedSessionId(autoId)
+          if (autoId) void requestSessionReplay(autoId)
         }
       } else if (type === 'started') {
         const session = data as SessionInfo
@@ -232,6 +322,7 @@ export function useVSCodeBridge(): BridgeHookResult {
         pendingEventsRef.current.length = 0
         selectedSessionIdRef.current = session.id
         setSelectedSessionId(session.id)
+        void requestSessionReplay(session.id)
       } else if (type === 'updated') {
         const { sessionId, label } = data as { sessionId: string; label: string }
         setSessions(prev => prev.map(s =>
@@ -252,7 +343,7 @@ export function useVSCodeBridge(): BridgeHookResult {
       unsubConfig()
       unsubSession()
     }
-  }, [])
+  }, [requestSessionReplay])
 
   const consumeEvents = useCallback(() => {
     // Clear in-place so stale closures in animation callbacks
@@ -263,12 +354,17 @@ export function useVSCodeBridge(): BridgeHookResult {
   /** Switch session selection. Does NOT flush events — call flushSessionEvents
    *  from useLayoutEffect after the simulation state has been saved/swapped. */
   const selectSession = useCallback((sessionId: string | null) => {
+    if (sessionId === selectedSessionIdRef.current) {
+      if (sessionId && replayError) void requestSessionReplay(sessionId)
+      return
+    }
     // Block event delivery to pending until the simulation state is swapped
     sessionSwitchPendingRef.current = true
     pendingEventsRef.current.length = 0
     selectedSessionIdRef.current = sessionId
     setSelectedSessionId(sessionId)
     if (sessionId) {
+      void requestSessionReplay(sessionId)
       setSessionsWithActivity(prev => {
         if (!prev.has(sessionId)) return prev
         const next = new Set(prev)
@@ -276,7 +372,7 @@ export function useVSCodeBridge(): BridgeHookResult {
         return next
       })
     }
-  }, [])
+  }, [requestSessionReplay, replayError])
 
   /** Flush buffered events for the selected session into pending.
    *  Must be called from useLayoutEffect AFTER simulation state is saved/swapped. */
@@ -313,6 +409,10 @@ export function useVSCodeBridge(): BridgeHookResult {
   }, [])
 
   return {
+    sessionReplayVersion,
+    sessionResetVersion,
+    loadingSessionId,
+    replayError,
     isVSCode,
     connectionStatus,
     pendingEvents: pendingEventsRef.current,

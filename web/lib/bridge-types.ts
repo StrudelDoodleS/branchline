@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 /**
  * Shared types for the VS Code bridge protocol.
  *
@@ -11,6 +12,9 @@ export interface AgentEvent {
   type: string
   payload: Record<string, unknown>
   sessionId?: string
+  eventId?: number
+  streamId?: string
+  replayed?: boolean
 }
 
 export interface SessionInfo {

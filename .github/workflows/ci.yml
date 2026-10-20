@@ -1,9 +1,13 @@
+# Branchline fork modifications; see FORK.md.
 name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, phone-controls]
   pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -12,8 +16,6 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       - uses: actions/setup-node@v4
         with:
@@ -30,7 +32,7 @@ jobs:
         run: pnpm --dir extension test
 
       - name: Extension typecheck
-        run: pnpm --filter agent-flow run lint
+        run: pnpm --filter branchline run lint
 
       - name: Web typecheck
         run: pnpm --dir web exec tsc --noEmit

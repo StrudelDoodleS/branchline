@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 /**
  * Message protocol between VS Code extension host and webview.
  *
@@ -68,12 +69,15 @@ export type WebviewToExtensionMessage =
 // ─── Transcript Types (from Claude Code JSONL files) ─────────────────────────
 
 export interface TranscriptEntry {
+  customTitle?: string
   sessionId: string
   type: string
   uuid?: string
   message: {
+    id?: string
     role: string
     model?: string
+    usage?: unknown
     content: Array<TranscriptContentBlock> | string
   }
 }
@@ -191,6 +195,9 @@ export interface WatchedSession {
   model: string | null
   /** Maps agent names to their last emitted model ID — re-emits on model change */
   modelDetectedAgents: Map<string, string>
+  /** Latest reported context size, independently for each Claude agent. */
+  contextTokensByAgent?: Map<string, number>
+  contextResponsesByAgent?: Map<string, { current: string; seen: Set<string> }>
   permissionTimer: NodeJS.Timeout | null
   permissionEmitted: boolean
   contextBreakdown: {

@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 import * as vscode from 'vscode'
 import * as fs from 'fs'
 import * as path from 'path'
@@ -13,6 +14,7 @@ import { readNewFileLines, foldPathCase } from './fs-utils'
 import { handlePermissionDetection } from './permission-detection'
 import { scanSubagentsDir, readSubagentNewLines } from './subagent-watcher'
 import { createLogger } from './logger'
+import { claudeContextPayload } from './claude-context'
 
 const log = createLogger('SessionWatcher')
 
@@ -570,18 +572,12 @@ export class SessionWatcher implements AgentSessionWatcher {
     return 0
   }
 
-  /** Emit a context_update event with cumulative token breakdown */
+  /** Emit the latest context usage with estimated composition. */
   private emitContextUpdate(agentName: string, session: WatchedSession, sessionId?: string): void {
-    const bd = session.contextBreakdown
-    const total = bd.systemPrompt + bd.userMessages + bd.toolResults + bd.reasoning + bd.subagentResults
     this.emit({
       time: this.elapsed(sessionId),
       type: 'context_update',
-      payload: {
-        agent: agentName,
-        tokens: total,
-        breakdown: { ...bd },
-      },
+      payload: claudeContextPayload(session, agentName),
     }, sessionId)
   }
 

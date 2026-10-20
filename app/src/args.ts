@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 import { DEFAULT_RELAY_PORT } from '../../extension/src/constants'
 
 /** Parse CLI arguments. Keeps it simple — no dependencies. */
@@ -18,7 +19,7 @@ export function parseArgs(argv: string[]) {
       verbose = true
     } else if (arg === '--help' || arg === '-h') {
       console.log(`
-Usage: agent-flow [options]
+Usage: branchline [options]
 
 Options:
   -p, --port <number>  Port for the server (default: ${DEFAULT_RELAY_PORT})

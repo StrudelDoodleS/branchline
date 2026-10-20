@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 /**
  * VS Code Bridge — enables the visualizer to communicate with the VS Code extension host.
  *
@@ -53,7 +54,7 @@ class VSCodeBridge {
       case 'agent-event-batch':
         for (const event of data.events) {
           for (const cb of this.eventListeners) {
-            cb(event)
+            cb({ ...event, replayed: true })
           }
         }
         break

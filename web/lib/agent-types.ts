@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 // Agent Visualizer Types — Holographic Edition v2
 // Now with actual information visibility
 
@@ -148,6 +149,8 @@ export interface Particle {
 }
 
 export interface SimulationEvent {
+  eventId?: number
+  streamId?: string
   time: number
   type:
     | 'agent_spawn'

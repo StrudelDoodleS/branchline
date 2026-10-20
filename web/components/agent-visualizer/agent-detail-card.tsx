@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 'use client'
 
 import { CARD, Z, type AgentState } from '@/lib/agent-types'
@@ -41,6 +42,7 @@ export function AgentDetailCard({
         left,
         top,
         width: CARD.detail.width,
+        maxWidth: `calc(100vw - ${CARD.margin * 2}px)`,
         zIndex: Z.detailCard,
       }}
     >
@@ -49,12 +51,12 @@ export function AgentDetailCard({
           className="w-2 h-2 rounded-full"
           style={{ background: stateColor, boxShadow: `0 0 8px ${stateColor}` }}
         />
-        <div className="flex flex-col">
-          <span className="text-xs font-mono" style={{ color: COLORS.textPrimary }}>
+        <div className="flex min-w-0 flex-col">
+          <span className="truncate text-xs font-mono" style={{ color: COLORS.textPrimary }}>
             {agent.name}
           </span>
           {agent.model && (
-            <span className="text-[9px] font-mono" style={{ color: COLORS.textDim }}>
+            <span className="truncate text-[9px] font-mono" style={{ color: COLORS.textDim }}>
               {formatModelName(agent.model)}
             </span>
           )}
@@ -63,7 +65,7 @@ export function AgentDetailCard({
 
       {/* Context bar */}
       <div className="mb-3">
-        <div className="flex justify-between mb-1">
+        <div className="mb-1 flex flex-wrap justify-between gap-x-2 gap-y-1">
           <span className="text-[10px]" style={{ color: COLORS.textMuted }}>Context</span>
           <span className="text-[10px] font-mono" style={{ color: COLORS.textDim }}>
             {formatTokens(agent.tokensUsed)} / {formatTokens(agent.tokensMax)} ({contextPercent}%)
@@ -73,7 +75,7 @@ export function AgentDetailCard({
       </div>
 
       {/* Stats row */}
-      <div className="flex gap-3 mb-3 text-[10px] font-mono" style={{ color: COLORS.textDim }}>
+      <div className="mb-3 flex flex-wrap gap-x-3 gap-y-1 text-[10px] font-mono" style={{ color: COLORS.textDim }}>
         <span>{agent.toolCalls} tools</span>
         <span>{agent.timeAlive.toFixed(1)}s alive</span>
         <span className="capitalize" style={{ color: stateColor }}>{agent.state}</span>

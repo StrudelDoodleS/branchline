@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 /**
  * Shared relay module — receives agent events and streams them to SSE clients.
  * Used by both the dev relay server and the standalone app.
@@ -22,6 +23,8 @@ import {
 } from '../extension/src/constants'
 import { setLogLevel } from '../extension/src/logger'
 import type { TelemetryClient } from './telemetry'
+import { SessionReplayStore } from './session-replay'
+import { claudeContextPayload } from '../extension/src/claude-context'
 
 const MAX_EVENT_BUFFER = 5000
 const DISCOVERY_DIR = path.join(os.homedir(), '.claude', 'agent-flow')
@@ -77,7 +80,7 @@ function broadcast(data: string) {
 
 // ─── Event buffering ────────────────────────────────────────────────────────
 
-const eventBuffer = new Map<string, AgentEvent[]>()
+const eventBuffer = new SessionReplayStore(MAX_EVENT_BUFFER)
 
 function broadcastEvent(event: AgentEvent) {
   sessionEventCount++
@@ -88,16 +91,8 @@ function broadcastEvent(event: AgentEvent) {
   const sid = event.sessionId?.slice(0, SESSION_ID_DISPLAY) || '?'
   log(`[event] ${event.type} (session ${sid})`)
 
-  if (event.sessionId) {
-    let buf = eventBuffer.get(event.sessionId) || []
-    buf.push(event)
-    if (buf.length > MAX_EVENT_BUFFER) {
-      buf = buf.slice(buf.length - MAX_EVENT_BUFFER)
-    }
-    eventBuffer.set(event.sessionId, buf)
-  }
-
-  broadcast(JSON.stringify({ type: 'agent-event', event }))
+  const recorded = eventBuffer.push(event)
+  broadcast(JSON.stringify({ type: 'agent-event', event: recorded }))
 }
 
 function broadcastSessionLifecycle(type: 'started' | 'ended' | 'updated', sessionId: string, label: string) {
@@ -126,12 +121,10 @@ function elapsed(sessionId?: string): number {
 }
 
 function emitContextUpdate(agentName: string, session: WatchedSession, sessionId?: string) {
-  const bd = session.contextBreakdown
-  const total = bd.systemPrompt + bd.userMessages + bd.toolResults + bd.reasoning + bd.subagentResults
   broadcastEvent({
     time: elapsed(sessionId),
     type: 'context_update',
-    payload: { agent: agentName, tokens: total, breakdown: { ...bd } },
+    payload: claudeContextPayload(session, agentName),
     sessionId,
   })
 }
@@ -353,6 +346,7 @@ function removeDiscoveryFile() {
 export interface Relay {
   /** Handle an incoming SSE connection */
   handleSSE: (req: http.IncomingMessage, res: http.ServerResponse) => void
+  handleSessionReplay: (req: http.IncomingMessage, res: http.ServerResponse) => void
   /** Clean up all resources */
   dispose: () => void
 }
@@ -403,7 +397,7 @@ export async function createRelay(options: RelayOptions): Promise<Relay> {
     }
 
     hookServer.onEvent((event: AgentEvent) => {
-      broadcast(JSON.stringify({ type: 'agent-event', event }))
+      broadcastEvent(event)
     })
 
     writeDiscoveryFile(hookPort, workspace)
@@ -510,9 +504,16 @@ export async function createRelay(options: RelayOptions): Promise<Relay> {
       if (sorted.length > 0) {
         const buffered = eventBuffer.get(sorted[0].id)
         if (buffered) {
-          sendSSE(res, { type: 'agent-event-batch', events: buffered })
+          sendSSE(res, { type: 'agent-event-batch', events: buffered.events })
         }
       }
+    },
+
+    handleSessionReplay(req: http.IncomingMessage, res: http.ServerResponse) {
+      const sessionId = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams.get('sessionId')
+      const replay = sessionId ? eventBuffer.get(sessionId) : undefined
+      res.writeHead(replay ? 200 : 404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+      res.end(JSON.stringify(replay ?? { error: 'Session history is unavailable' }))
     },
 
     dispose() {

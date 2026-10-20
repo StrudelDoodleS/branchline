@@ -1,167 +1,93 @@
-# Agent Flow
+# Branchline
 
-Real-time visualization of Claude Code and Codex agent orchestration. Watch your agents think, branch, and coordinate as they work. [Demo video here](https://www.youtube.com/watch?v=Ud6eDrFN-TA). 
+A portrait-friendly dashboard for Claude Code and Codex sessions, with a file tree for agents and subagents.
 
-![Agent Flow visualization](https://res.cloudinary.com/dxlvclh9c/image/upload/v1773924941/screenshot_e7yox3.png)
+Branchline is an independent fork of [Agent Flow](https://github.com/patoles/agent-flow), originally created by [Simon Patole](https://github.com/patoles). It is not an official Agent Flow release or an endorsed distribution. The fork starts from upstream v0.9.2; [FORK.md](FORK.md) records the changes and compatibility details.
 
-## Why Agent Flow?
+## What this fork adds
 
-I built Agent Flow while developing [CraftMyGame](https://craftmygame.com), a game creation platform driven by AI agents. Debugging agent behavior was painful, so we made it visual. Now we're sharing it.
+- A main-session dropdown instead of a scrolling row of sessions.
+- A compact file tree with expand/collapse and agent activity below it on phones.
+- Codex subagents grouped under their actual parent conversation, including nested agents.
+- Session history loading and reconnect recovery that preserve agent identities and newer live events.
+- Readable controls, portrait-safe panels, and activity logs that respect your scroll position.
+- Claude context usage from the latest response, including cached tokens, with bars and rings bounded to their tracks.
 
-Claude Code is powerful, but its execution is a black box — you see the final result, not the journey. Agent Flow makes the invisible visible:
+The original graph view, tool details, transcripts, file activity, and runtime selection remain available.
 
-- **Understand agent behavior** — See how Claude breaks down problems, which tools it reaches for, and how subagents coordinate
-- **Debug tool call chains** — When something goes wrong, trace the exact sequence of decisions and tool calls that led there
-- **See where time is spent** — Identify slow tool calls, unnecessary branching, or redundant work at a glance
-- **Learn by watching** — Build intuition for how to write better prompts by observing how Claude interprets and executes them
+## Run from source
 
-## Features
-
-- **Live agent visualization**: Watch agent execution as an interactive node graph with real-time tool calls, branching, and return flows
-- **Claude Code + Codex**: Auto-detects sessions from both runtimes concurrently and shows them side-by-side, or restrict to one via the `agentVisualizer.runtime` setting
-- **Claude Code hooks**: Lightweight HTTP hook server receives events directly from Claude Code for zero-latency streaming
-- **Codex rollout tailing**: Reads `~/.codex/sessions/**/rollout-*.jsonl` (respects `CODEX_HOME`) and surfaces tool calls, reasoning, and authoritative token counts from Codex's own event stream
-- **Multi-session support**: Track multiple concurrent agent sessions with tabs
-- **Interactive canvas**: Pan, zoom, click agents and tool calls to inspect details
-- **Timeline & transcript panels**: Review the full execution timeline, file attention heatmap, and message transcript
-- **JSONL log file support**: Point at any JSONL event log to replay or watch agent activity
-
-## Getting Started
-
-### Quick Start (no VS Code required)
+Use Node.js 22 or newer and pnpm 10. This fork is not published to npm or the VS Code marketplace.
 
 ```bash
-npx agent-flow-app
+git clone --branch phone-controls https://github.com/StrudelDoodleS/branchline.git
+cd branchline
+pnpm install --frozen-lockfile
+pnpm run build:app
+
+# Run from the workspace containing the sessions you want to monitor.
+branchline_repo="$(pwd)"
+cd /path/to/your/workspace
+node "$branchline_repo/app/dist/app.js" --no-open --port 3001
 ```
 
-This starts the visualizer in your browser. Start a Claude Code session in another terminal — events will stream in real-time.
+Open [localhost:3001](http://localhost:3001). The server listens on the loopback interface. The CLI installs the Claude command hooks if needed; Codex sessions are read from local rollout files.
 
-Options:
-- `--port <number>` — change the server port (default: 3001)
-- `--no-open` — don't open the browser automatically
-- `--verbose` — show detailed event logs
+CLI options: `--port <number>`, `--no-open`, `--verbose`, and `--help`.
 
-### Standalone Web App (from source)
+### Open on a phone over SSH
+
+From Termux or another SSH client:
 
 ```bash
-git clone https://github.com/patoles/agent-flow.git
-cd agent-flow
-pnpm i
-pnpm run setup      # configure Claude Code hooks (one-time)
-pnpm run dev        # start the web app + event relay
+ssh -N -L 127.0.0.1:3001:127.0.0.1:3001 user@your-server
 ```
 
-Open http://localhost:3000 and start a Claude Code session in another terminal — events will stream to the browser in real-time.
-
-### VS Code Extension
-
-1. Install the extension
-2. Open the Command Palette (`Cmd+Shift+P`) and run **Agent Flow: Open Agent Flow**
-3. Start a Claude Code or Codex session in your workspace — Agent Flow will auto-detect it
-
-Agent Flow automatically configures Claude Code hooks the first time you open the panel. To manually reconfigure, run **Agent Flow: Configure Claude Code Hooks** from the Command Palette.
+Open `http://127.0.0.1:3001` in the phone browser. Select a main session, then tap an agent in its tree to read activity. Graph view remains available beside Tree.
 
 ### Runtime selection
 
-By default Agent Flow watches both Claude Code (`~/.claude/projects/`) and Codex (`~/.codex/sessions/`) concurrently in all three entry points (VS Code extension, `pnpm run dev`, `npx agent-flow-app`). Sessions are shown side-by-side and tagged by runtime. If you only use one, the other is a harmless no-op — no visible effect, no user action needed.
+`AGENT_FLOW_RUNTIME=auto` watches Claude Code and Codex together. Set it to `claude` or `codex` to watch one runtime. For a non-default Codex installation, set `CODEX_HOME`.
 
-To restrict to one runtime:
+The legacy `AGENT_FLOW_*` variables, `~/.claude/agent-flow/` hook directory, and `agentVisualizer.*` extension settings remain compatible with existing installations.
 
-- **VS Code extension:** set `agentVisualizer.runtime` to `"auto"` / `"claude"` / `"codex"` in your settings
-- **`pnpm run dev` and `npx agent-flow-app`:** set the `AGENT_FLOW_RUNTIME` environment variable to `claude` or `codex` (defaults to watching both)
-
-For non-default Codex installs, set the `CODEX_HOME` environment variable.
-
-### JSONL Event Log
-
-You can also point Agent Flow at a JSONL event log file:
-
-1. Set `agentVisualizer.eventLogPath` in your VS Code settings to the path of a `.jsonl` file
-2. Agent Flow will tail the file and visualize events as they arrive
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `Agent Flow: Open Agent Flow` | Open the visualizer panel |
-| `Agent Flow: Open Agent Flow to Side` | Open in a side editor column |
-| `Agent Flow: Connect to Running Agent` | Manually connect to an agent session |
-| `Agent Flow: Configure Claude Code Hooks` | Set up Claude Code hooks for live streaming |
-
-## Keyboard Shortcut
-
-| Shortcut | Action |
-|----------|--------|
-| `Cmd+Alt+A` (Mac) / `Ctrl+Alt+A` (Win/Linux) | Open Agent Flow |
-
-## Settings
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `agentVisualizer.runtime` | `"auto"` | Which agent runtime(s) to watch: `"auto"` (both), `"claude"`, or `"codex"` |
-| `agentVisualizer.devServerPort` | `0` | Development server port (0 = production mode) |
-| `agentVisualizer.eventLogPath` | `""` | Path to a JSONL event log file to watch |
-| `agentVisualizer.autoOpen` | `false` | Auto-open when an agent session starts |
-
-## Requirements
-
-- [Node.js](https://nodejs.org/) 20+ (LTS recommended)
-- [pnpm](https://pnpm.io/)
-- Claude Code CLI
-- For the VS Code extension: a VSCode-compatible IDE 1.85+ (e.g. [VS Code](https://code.visualstudio.com/), [Cursor](https://cursor.sh/), [Windsurf](https://windsurf.com/))
-
-## Development
+## Development and verification
 
 ```bash
-pnpm i              # install dependencies for all packages
-pnpm run setup      # configure Claude Code hooks (one-time)
-pnpm run dev        # start dev server + event relay
+pnpm install --frozen-lockfile
+pnpm test
+pnpm --dir extension test
+pnpm --filter branchline run lint
+pnpm --dir web exec tsc --noEmit --incremental false
+pnpm run build:app
 ```
 
-`pnpm run dev` starts both the Next.js dev server and an event relay that receives Claude Code events and streams them to the browser via SSE.
+`pnpm run dev` starts the development relay and web UI. `pnpm run build:all` builds the VS Code webview and extension. The extension uses the Branchline command category and a separate package identity.
 
-Other scripts:
+Browser checks exercise portrait navigation, trees, history, reconnects, and context-bar geometry:
 
-| Script | Description |
-|--------|-------------|
-| `pnpm run dev:demo` | Start with demo/mock data |
-| `pnpm run dev:relay` | Run the event relay server standalone |
-| `pnpm run dev:extension` | Watch-build the extension |
-| `pnpm run build:all` | Production build (webview + extension) |
-| `pnpm run build:web` | Build the Next.js web app |
-| `pnpm run build:extension` | Build the extension |
-| `pnpm run build:webview` | Build the webview assets |
+```bash
+uvx --from playwright==1.63.0 playwright install chromium
+uvx --from playwright==1.63.0 python scripts/check-phone-controls.py http://127.0.0.1:3001
+```
 
-## Star History
+Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE` if using an existing Chromium installation. An optional second argument selects check names, separated by commas. The checks use synthetic browser events and do not write to agent transcripts.
 
-[![Star History Chart](https://api.star-history.com/chart?repos=patoles/agent-flow&type=date&legend=bottom-right)](https://www.star-history.com/?repos=patoles%2Fagent-flow&type=date&legend=bottom-right)
+## Fork maintenance
 
+The default branch is `phone-controls`. Keep `origin` pointing to this fork and `upstream` pointing to the original project:
 
-## Author
+```bash
+git remote add upstream https://github.com/patoles/agent-flow.git
+git fetch upstream
+```
 
-Created by [Simon Patole](https://github.com/patoles), for [CraftMyGame](https://craftmygame.com).
+Review upstream changes before merging or cherry-picking them. The upstream `main` history is retained separately from this fork's default branch.
 
-## Privacy & Telemetry
+## Telemetry
 
-Agent Flow ships **opt-out** anonymous usage telemetry, enabled by default only
-in the published `npx agent-flow-app` binary. `pnpm run dev` and the VS Code
-extension emit nothing. Only aggregate events are sent — session count,
-duration, event count, OS/arch, Agent Flow version, distinct model IDs
-observed, which runtimes were watched, and error class names. Prompts, file
-paths, tool calls, user info, and environment variables are never sent.
+Telemetry is disabled by default and no collector endpoint or key is configured in this fork. Enabling the compatibility flag alone does not send events or create telemetry state. A maintainer would need to configure a separate collector and explicitly opt in.
 
-- **Turn off:** `export AGENT_FLOW_TELEMETRY=false` or `export DO_NOT_TRACK=1`
-  (disabled installs write zero state to disk — no `~/.agent-flow/` directory)
-- **Inspect the payload:** `cat ~/.agent-flow/telemetry/events.jsonl`
-- **Full schema + exact fields:** see the v0.8.1 entry in
-  [extension/CHANGELOG.md](extension/CHANGELOG.md) or the `serialize()` function
-  in [scripts/telemetry.ts](scripts/telemetry.ts)
-- **Reset your anonymous identity:** delete `~/.agent-flow/installation-id` —
-  a fresh random UUIDv4 will be generated on next run
+## Attribution and license
 
-
-## License
-
-Apache 2.0 — see [LICENSE](LICENSE) for details.
-
-The name "Agent Flow" and associated logos are trademarks of Simon Patole. See [TRADEMARK.md](TRADEMARK.md) for usage guidelines.
+Apache 2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE). Original attribution and upstream trademark information are retained. Fork changes are maintained by [StrudelDoodleS](https://github.com/StrudelDoodleS). See [CONTRIBUTING.md](CONTRIBUTING.md) for fork contributions.

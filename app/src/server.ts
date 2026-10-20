@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 /**
  * Combined HTTP server: serves the visualizer UI and streams events via SSE.
  * Reuses the extension's hook server, transcript parser, and session watcher.
@@ -34,6 +35,9 @@ export async function startServer(options: ServerOptions) {
     // SSE endpoint
     if (req.url === '/events') {
       return relay.handleSSE(req, res)
+    }
+    if (req.method === 'GET' && req.url?.startsWith('/session-events?')) {
+      return relay.handleSessionReplay(req, res)
     }
 
     // Static files (UI)

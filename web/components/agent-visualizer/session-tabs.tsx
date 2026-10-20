@@ -1,7 +1,6 @@
+// Branchline fork modifications; see FORK.md.
 'use client'
 
-import { useEffect, useRef, useCallback } from 'react'
-import { COLORS } from '@/lib/colors'
 import type { SessionInfo } from '@/lib/vscode-bridge'
 
 interface SessionTabsProps {
@@ -12,71 +11,31 @@ interface SessionTabsProps {
   onCloseSession: (id: string) => void
 }
 
-export function SessionTabs({
-  sessions,
-  selectedSessionId,
-  sessionsWithActivity,
-  onSelectSession,
-  onCloseSession,
-}: SessionTabsProps) {
-  const buttonRefs = useRef<Map<string, HTMLButtonElement>>(new Map())
-
-  const setButtonRef = useCallback((id: string, el: HTMLButtonElement | null) => {
-    if (el) buttonRefs.current.set(id, el)
-    else buttonRefs.current.delete(id)
-  }, [])
-
-  // Scroll selected tab into view whenever it changes
-  useEffect(() => {
-    if (!selectedSessionId) return
-    const el = buttonRefs.current.get(selectedSessionId)
-    el?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' })
-  }, [selectedSessionId])
-
+export function SessionTabs({ sessions, selectedSessionId, sessionsWithActivity, onSelectSession, onCloseSession }: SessionTabsProps) {
+  const ordered = [...sessions].sort((a, b) => Number(b.status === 'active') - Number(a.status === 'active') || b.lastActivityTime - a.lastActivityTime)
   return (
-    <div className="flex gap-1">
-      {sessions.map(session => {
-        const isSelected = session.id === selectedSessionId
-        const isActive = session.status === 'active'
-        const hasActivity = sessionsWithActivity.has(session.id)
-        // Green dot: session is active, OR has unseen background activity
-        const showGreen = isActive || hasActivity
-        return (
-          <button
-            key={session.id}
-            ref={(el) => setButtonRef(session.id, el)}
-            onClick={() => onSelectSession(session.id)}
-            className="group px-1.5 py-0.5 rounded transition-all flex items-center gap-1"
-            style={{
-              flexShrink: 0,
-              whiteSpace: 'nowrap',
-              background: isSelected ? COLORS.tabSelectedBg : COLORS.tabInactiveBg,
-              border: `1px solid ${isSelected ? COLORS.tabSelectedBorder : COLORS.tabInactiveBorder}`,
-              color: isSelected ? COLORS.holoBright : COLORS.textMuted,
-            }}
-          >
-            <span
-              className="inline-block w-1.5 h-1.5 rounded-full flex-shrink-0"
-              style={{
-                background: showGreen ? COLORS.complete : COLORS.idle + '40',
-                boxShadow: showGreen ? `0 0 4px ${COLORS.complete}` : 'none',
-                animation: hasActivity && !isSelected ? 'pulse 1.5s infinite' : 'none',
-              }}
-            />
-            {session.label}
-            <span
-              className="ml-0.5 opacity-0 group-hover:opacity-60 transition-opacity cursor-pointer"
-              style={{ color: COLORS.tabClose, fontSize: 8, lineHeight: '10px' }}
-              onClick={(e) => {
-                e.stopPropagation()
-                onCloseSession(session.id)
-              }}
-            >
-              ✕
-            </span>
-          </button>
-        )
-      })}
+    <div className="flex min-w-0 items-end gap-2">
+      <label className="flex min-w-0 flex-1 flex-col gap-1 text-xs text-slate-200">
+        <span>Main session</span>
+        <select
+          aria-label="Main session"
+          value={selectedSessionId ?? ''}
+          onChange={event => onSelectSession(event.target.value)}
+          className="min-h-11 w-full min-w-0 rounded-md border border-slate-500 bg-slate-900 px-2 text-sm text-slate-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
+          style={{ colorScheme: 'dark' }}
+        >
+          {!selectedSessionId && <option value="" disabled>Choose a session</option>}
+          {ordered.map(session => <option key={session.id} value={session.id}>
+            {session.label} · {session.status === 'active' ? 'Active' : 'Idle'}{sessionsWithActivity.has(session.id) ? ' · New activity' : ''}
+          </option>)}
+        </select>
+      </label>
+      {selectedSessionId && <button
+        type="button"
+        aria-label="Dismiss session"
+        onClick={() => onCloseSession(selectedSessionId)}
+        className="min-h-11 min-w-11 rounded-md border border-slate-500 bg-slate-800 px-2 text-slate-100 focus-visible:outline-2 focus-visible:outline-cyan-300"
+      >✕</button>}
     </div>
   )
 }

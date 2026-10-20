@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 'use client'
 
 import { useRef, type ReactNode } from 'react'
@@ -142,7 +143,7 @@ export function ProgressBar({ percent, color, trackColor = COLORS.holoBg10 }: Pr
       <div
         className="h-full rounded-full transition-all duration-500"
         style={{
-          width: `${percent}%`,
+          width: `${Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : 0}%`,
           background: color,
           boxShadow: `0 0 6px ${color}40`,
         }}

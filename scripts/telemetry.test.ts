@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 import { test } from 'node:test'
 import { strict as assert } from 'node:assert'
 import * as fs from 'fs'
@@ -29,13 +30,23 @@ function baseEvent() {
   }
 }
 
-test('hardcoded constants are present', () => {
-  assert.match(TELEMETRY_ENDPOINT, /^https:\/\/.+\.supabase\.co$/)
-  assert.match(TELEMETRY_PUBLISHABLE_KEY, /^sb_publishable_/)
+test('the fork has no default telemetry collector', () => {
+  assert.equal(TELEMETRY_ENDPOINT, '')
+  assert.equal(TELEMETRY_PUBLISHABLE_KEY, '')
 })
 
-test('isTelemetryEnabled: default (no env) is true', () => {
-  assert.equal(isTelemetryEnabled({}), true)
+test('isTelemetryEnabled: telemetry is disabled by default', () => {
+  assert.equal(isTelemetryEnabled({}), false)
+})
+
+test('an opt-in without a configured collector creates no telemetry state', async () => {
+  const dir = setup()
+  const client = createTelemetryClient({logDir: path.join(dir, 'telemetry'), installIdPath: path.join(dir, 'installation-id'), env: {AGENT_FLOW_TELEMETRY: 'true'}})
+  assert.equal(client.isEnabled(), false)
+  await client.init()
+  client.emit(baseEvent())
+  await client.dispose()
+  assert.deepEqual(fs.readdirSync(dir), [])
 })
 
 test('isTelemetryEnabled: AGENT_FLOW_TELEMETRY=false disables', () => {
@@ -62,7 +73,7 @@ test('isTelemetryEnabled: DO_NOT_TRACK wins even when AGENT_FLOW_TELEMETRY=true'
 test('emit appends to JSONL when enabled', async () => {
   const dir = setup()
   const client = makeClient(dir)
-  delete process.env.AGENT_FLOW_TELEMETRY
+  process.env.AGENT_FLOW_TELEMETRY = 'true'
   delete process.env.DO_NOT_TRACK
   await client.init()
   client.emit(baseEvent())
@@ -110,7 +121,7 @@ test('disabled via DO_NOT_TRACK=1 writes nothing to disk', async () => {
 
 test('install-id persists across init calls', async () => {
   const dir = setup()
-  delete process.env.AGENT_FLOW_TELEMETRY
+  process.env.AGENT_FLOW_TELEMETRY = 'true'
   delete process.env.DO_NOT_TRACK
   const client1 = makeClient(dir)
   await client1.init()
@@ -131,7 +142,7 @@ test('install-id persists across init calls', async () => {
 
 test('emit sanitizes session_id', async () => {
   const dir = setup()
-  delete process.env.AGENT_FLOW_TELEMETRY
+  process.env.AGENT_FLOW_TELEMETRY = 'true'
   delete process.env.DO_NOT_TRACK
   const client = makeClient(dir)
   await client.init()

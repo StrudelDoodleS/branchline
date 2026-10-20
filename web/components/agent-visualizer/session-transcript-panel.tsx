@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 'use client'
 
 import { useRef, useEffect, useState } from 'react'
@@ -62,9 +63,9 @@ export function SessionTranscriptPanel({
   return (
     <SlidingPanel
       visible={visible}
-      position={{ right: 0, bottom: 0, top: 36 }}
+      position={{ right: 0, bottom: 0, top: 'var(--agent-controls-bottom, 48px)' }}
       zIndex={Z.transcriptPanel}
-      width={CARD.transcript.width}
+      width={`min(${CARD.transcript.width}px, 100%)`}
       {...stopPropagationHandlers}
     >
       <div

@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 'use client'
 
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
@@ -192,7 +193,7 @@ export function MessageFeedPanel({
     return (
       <div
         className="absolute cursor-pointer transition-all hover:scale-[1.02]"
-        style={{ top: 48, left: 12, zIndex: Z.info, pointerEvents: 'auto' }}
+        style={{ top: 'var(--agent-controls-bottom, 48px)', left: 12, zIndex: Z.info, pointerEvents: 'auto' }}
         onClick={() => setExpanded(true)}
       >
         <div className="glass-card px-3 py-2 flex items-center gap-2" style={{ maxWidth: 320 }}>
@@ -214,7 +215,7 @@ export function MessageFeedPanel({
     <div
       ref={panelRef}
       className="absolute"
-      style={{ top: 48, left: 12, zIndex: Z.info, pointerEvents: 'auto' }}
+      style={{ top: 'var(--agent-controls-bottom, 48px)', left: 12, zIndex: Z.info, pointerEvents: 'auto' }}
       onClick={(e) => e.stopPropagation()}
     >
       <div className="glass-card flex flex-col" style={{ width: 320, maxHeight: 420 }}>

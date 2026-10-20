@@ -1,6 +1,7 @@
 #!/usr/bin/env node
+// Branchline fork modifications; see FORK.md.
 /**
- * Standalone setup script for Agent Flow.
+ * Standalone setup script for Branchline.
  *
  * Performs the same hook configuration that the VS Code extension does on
  * activation, so developers can run the webview in dev mode without needing
@@ -255,12 +256,12 @@ if (require.main === module) {
   const force = process.argv.includes('--force')
 
   if (!force && isAlreadySetup()) {
-    console.log('Agent Flow is already set up. Run with --force to reconfigure.')
+    console.log('Branchline is already set up. Run with --force to reconfigure.')
     process.exit(0)
   }
 
-  console.log('Setting up Agent Flow...\n')
+  console.log('Setting up Branchline...\n')
   ensureHookScript()
   if (!configureHooks()) process.exit(1)
-  console.log('\nDone! New sessions will stream events to Agent Flow.')
+  console.log('\nDone! New sessions will stream events to Branchline.')
 }

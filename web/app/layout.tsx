@@ -1,27 +1,11 @@
+// Branchline fork modifications; see FORK.md.
 import type { Metadata } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'LLM Agent Visualizer',
-  description: 'Real-time visualization of LLM agent execution flows - VS Code extension concept',
-  generator: 'v0.app',
-  icons: {
-    icon: [
-      {
-        url: '/icon-light-32x32.png',
-        media: '(prefers-color-scheme: light)',
-      },
-      {
-        url: '/icon-dark-32x32.png',
-        media: '(prefers-color-scheme: dark)',
-      },
-      {
-        url: '/icon.svg',
-        type: 'image/svg+xml',
-      },
-    ],
-    apple: '/apple-icon.png',
-  },
+  title: 'Branchline',
+  description: 'Claude Code and Codex session trees, live activity, and context monitoring',
+  icons: { icon: '/icon.svg' },
 }
 
 export default function RootLayout({

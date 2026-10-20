@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 /**
  * Transcript parsing logic extracted from SessionWatcher.
  *
@@ -25,6 +26,7 @@ import {
 import { summarizeInput, summarizeResult, extractInputData, detectError, buildDiscovery } from './tool-summarizer'
 import { estimateTokensFromContent, estimateTokensFromText } from './token-estimator'
 import { createLogger } from './logger'
+import { recordClaudeContext } from './claude-context'
 
 const log = createLogger('TranscriptParser')
 
@@ -166,6 +168,15 @@ export class TranscriptParser {
     }
 
     // Handle inline subagent progress events (newer Claude Code versions)
+    if (parsed.type === 'custom-title' && typeof parsed.customTitle === 'string' && parsed.customTitle.trim() && sessionId) {
+      const session = this.delegate.getSession(sessionId)
+      if (session) {
+        session.label = parsed.customTitle.trim()
+        session.labelSet = true
+        this.delegate.fireSessionLifecycle({ type: 'updated', sessionId, label: session.label })
+      }
+      return
+    }
     if (parsed.type === 'progress') {
       this.handleProgressEvent(parsed, sessionId)
       return
@@ -203,6 +214,10 @@ export class TranscriptParser {
     const role = msg.role // 'assistant', 'user', 'human'
 
     const session = sessionId ? this.delegate.getSession(sessionId) : undefined
+
+    if (session && entry.type === 'assistant' && (!msg.model || isRealModelId(msg.model))) {
+      recordClaudeContext(session, agentName, msg.usage, msg.id || entry.uuid)
+    }
 
     // Extract model from assistant messages (updates tokensMax on the frontend).
     // Per-agent tracking: re-emit when the model changes (e.g. /model switch).
@@ -542,6 +557,13 @@ export class TranscriptParser {
         if (!line.trim()) { continue }
         try {
           const entry = JSON.parse(line.trim()) as TranscriptEntry & { toolUseResult?: unknown }
+          if (entry.type === 'assistant' && (!entry.message?.model || isRealModelId(entry.message.model))) {
+            recordClaudeContext(session, ORCHESTRATOR_NAME, entry.message?.usage, entry.message?.id || entry.uuid)
+          }
+          if (entry.type === 'custom-title' && typeof entry.customTitle === 'string' && entry.customTitle.trim()) {
+            session.label = entry.customTitle.trim()
+            session.labelSet = true
+          }
           // Track background subagents still running at attach time, so the
           // <task-notification> that arrives later can complete them.
           if (entry.type === 'user' && entry.message) {

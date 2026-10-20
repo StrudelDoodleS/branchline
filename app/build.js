@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// Branchline fork modifications; see FORK.md.
 /**
  * Builds the standalone web app package:
  *   1. Builds the webview UI via Vite (into app/dist/webview/)
@@ -14,7 +15,7 @@ const ROOT = path.join(__dirname, '..')
 const APP_DIR = __dirname
 const APP_PKG = require(path.join(APP_DIR, 'package.json'))
 
-console.log('Building Agent Flow app...\n')
+console.log('Building Branchline app...\n')
 
 // 1. Build the webview UI
 console.log('[1/2] Building webview...')

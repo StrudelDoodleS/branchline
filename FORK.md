@@ -1,0 +1,34 @@
+# Branchline fork notes
+
+Branchline is maintained by StrudelDoodleS and derives from Agent Flow by Simon Patole, under Apache 2.0. It is independent of the upstream maintainers.
+
+## Base and branches
+
+- Upstream: https://github.com/patoles/agent-flow
+- Base: v0.9.2, commit `1d821aff72547f07b2836f62c28ef4bcfee9eef2`
+- Fork: https://github.com/StrudelDoodleS/branchline
+- Default branch: `phone-controls`
+
+## Changes carried by this fork
+
+- Main-session selection and a file tree for agents and nested subagents.
+- Portrait layouts, stronger control contrast, keyboard-safe buttons, and reading-position preservation in activity logs.
+- Codex thread ancestry and lifecycle aggregation: a working descendant keeps its main session active, and resuming it restores completed ancestors.
+- Bounded replay history with retained agent identities, per-session snapshots, sequence waterlines, stream-aware live-event buffering, and explicit reset handling.
+- Claude saved titles, latest cache-inclusive context usage per agent, replay-safe response tracking, and normalized context-bar/ring composition.
+- Root, extension, and browser regression coverage for these behaviors.
+- Separate Branchline package identities and branding; telemetry defaults off with no collector configured.
+
+Modified source files carry a Branchline fork notice. Git history records their full diffs.
+
+## Compatibility
+
+Existing hook installations and configuration remain usable. The `AGENT_FLOW_*` environment variables, `agentVisualizer.*` command and setting identifiers, and `~/.claude/agent-flow/` and `~/.agent-flow/` paths are retained as technical compatibility identifiers.
+
+An existing deployment can keep its checkout path and service name. Build and install its assets through the existing deployment process; repository setup does not require moving session data or changing Claude authentication.
+
+Package versions reflect the upstream base; the repository and commit identify the fork. No npm or marketplace package is published by this repository setup.
+
+## Attribution
+
+The original [LICENSE](LICENSE), [TRADEMARK.md](TRADEMARK.md), [CLA.md](CLA.md), and upstream history are retained for provenance. Branchline uses its own project name and branch icon. Original product logos and screenshots are not used for fork branding.

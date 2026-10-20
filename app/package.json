@@ -1,26 +1,31 @@
 {
-  "name": "agent-flow-app",
+  "name": "branchline-app",
   "version": "0.9.2",
-  "description": "Real-time visualization of AI agent orchestration — standalone web app",
+  "description": "Portrait-friendly monitoring for Claude Code and Codex sessions and subagents",
   "bin": {
-    "agent-flow": "dist/app.js"
+    "branchline": "dist/app.js"
   },
   "files": [
     "dist/"
   ],
   "license": "Apache-2.0",
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/patoles/agent-flow"
+    "url": "https://github.com/StrudelDoodleS/branchline"
   },
   "keywords": [
     "agent",
     "visualization",
     "ai",
     "llm",
-    "agent-flow"
-  ]
+    "branchline"
+  ],
+  "private": true,
+  "homepage": "https://github.com/StrudelDoodleS/branchline",
+  "bugs": {
+    "url": "https://github.com/StrudelDoodleS/branchline/issues"
+  }
 }

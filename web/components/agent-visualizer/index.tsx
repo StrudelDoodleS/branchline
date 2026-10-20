@@ -1,6 +1,7 @@
+// Branchline fork modifications; see FORK.md.
 "use client"
 
-import { useState, useCallback, useMemo, useEffect, useLayoutEffect, useRef } from "react"
+import { useState, useCallback, useMemo, useEffect, useLayoutEffect, useRef, type CSSProperties } from "react"
 import { useAgentSimulation } from "@/hooks/use-agent-simulation"
 import { useVSCodeBridge } from "@/hooks/use-vscode-bridge"
 import { useSelectionState } from "@/hooks/use-selection-state"
@@ -23,6 +24,7 @@ import { COLORS } from "@/lib/colors"
 import { MOCK_DURATION } from "@/lib/mock-scenario"
 import { MessageFeedPanel } from "./message-feed-panel"
 import { TopBar } from "./top-bar"
+import { AgentTreeView } from "./agent-tree-view"
 import { useAudioEffects } from "@/hooks/use-audio-effects"
 
 export function AgentVisualizer() {
@@ -63,15 +65,22 @@ export function AgentVisualizer() {
 
   const selection = useSelectionState({ agents, toolCalls, discoveries })
 
+  useEffect(() => {
+    selection.clearAllSelections()
+  }, [bridge.selectedSessionId, bridge.sessionResetVersion, selection.clearAllSelections])
+
   const [showStats, setShowStats] = useState(false)
   const [showHexGrid, setShowHexGrid] = useState(true)
   const [showCostOverlay, setShowCostOverlay] = useState(false)
   const [showTimeline, setShowTimeline] = useState(false)
   const [showFileAttention, setShowFileAttention] = useState(false)
   const [showTranscript, setShowTranscript] = useState(false)
+  const [headerHeight, setHeaderHeight] = useState(36)
+  const [viewMode, setViewMode] = useState<'tree' | 'graph'>('tree')
 
   // Mutually exclusive panel toggling — opening one closes the others
   const toggleExclusivePanel = useCallback((panel: 'files' | 'transcript' | 'cost') => {
+    if (panel === 'cost') setViewMode('graph')
     setShowFileAttention(prev => panel === 'files' ? !prev : false)
     setShowTranscript(prev => panel === 'transcript' ? !prev : false)
     setShowCostOverlay(prev => panel === 'cost' ? !prev : false)
@@ -93,16 +102,34 @@ export function AgentVisualizer() {
   // frame can consume and discard events from pendingEventsRef.
   const sessionCacheRef = useRef<Map<string, { snapshot: ReturnType<typeof saveSnapshot>; eventCount: number }>>(new Map())
   const prevSelectedRef = useRef<string | null>(null)
+  const prevReplayVersionRef = useRef(0)
+  const prevResetVersionRef = useRef(0)
   useLayoutEffect(() => {
+    const wasReset = bridge.sessionResetVersion !== prevResetVersionRef.current
+    if (wasReset) {
+      sessionCacheRef.current.clear()
+      prevSelectedRef.current = null
+      prevResetVersionRef.current = bridge.sessionResetVersion
+      restart()
+      setIsReviewing(false)
+    }
     if (bridge.selectedSessionId === null && prevSelectedRef.current !== null) {
       // Bridge reset (panel reopened / relay restarted): cached snapshots are stale
       sessionCacheRef.current.clear()
       prevSelectedRef.current = null
+      restart()
       return
     }
-    if (bridge.selectedSessionId && bridge.selectedSessionId !== prevSelectedRef.current) {
+    if (bridge.selectedSessionId && (bridge.selectedSessionId !== prevSelectedRef.current || bridge.sessionReplayVersion !== prevReplayVersionRef.current)) {
       // Review/scrub state is per-component, not per-session: the incoming tab is restored live
       setIsReviewing(false)
+      if (!bridge.isVSCode) {
+        restart()
+        bridge.flushSessionEvents(bridge.selectedSessionId)
+        prevSelectedRef.current = bridge.selectedSessionId
+        prevReplayVersionRef.current = bridge.sessionReplayVersion
+        return
+      }
       // Save outgoing session state (if any)
       if (prevSelectedRef.current !== null) {
         sessionCacheRef.current.set(prevSelectedRef.current, {
@@ -125,7 +152,7 @@ export function AgentVisualizer() {
 
       prevSelectedRef.current = bridge.selectedSessionId
     }
-  }, [bridge.selectedSessionId, restart, bridge.flushSessionEvents, saveSnapshot, restoreSnapshot, bridge.getSessionEventCount])
+  }, [bridge.selectedSessionId, bridge.sessionReplayVersion, bridge.sessionResetVersion, bridge.isVSCode, restart, bridge.flushSessionEvents, saveSnapshot, restoreSnapshot, bridge.getSessionEventCount])
 
   // Timeline events — incremental: only processes new conversation messages
   const timelineCacheRef = useRef<{
@@ -266,9 +293,12 @@ export function AgentVisualizer() {
 
   return (
     <OpenFileProvider value={bridge.isVSCode ? openFile : null}>
-    <div className="h-screen w-screen relative overflow-hidden" style={{ background: COLORS.void }}>
+    <div className="h-screen w-screen relative overflow-hidden" style={{
+      background: COLORS.void,
+      '--agent-controls-bottom': `${headerHeight + 24}px`,
+    } as CSSProperties}>
       {/* Empty state when no demo and no live data */}
-      {isEmpty && (
+      {isEmpty && viewMode === 'graph' && (
         <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
           <div className="text-center" style={{ fontFamily: "'SF Mono', 'Fira Code', monospace" }}>
             <div className="text-sm" style={{ color: '#66ccff80' }}>WAITING FOR AGENT SESSION</div>
@@ -278,7 +308,7 @@ export function AgentVisualizer() {
       )}
 
       {/* Canvas fills everything */}
-      <AgentCanvas
+      {viewMode === 'graph' && <AgentCanvas
         simulationRef={frameRef}
         selectedAgentId={selection.selectedAgentId}
         hoveredAgentId={selection.hoveredAgentId}
@@ -295,18 +325,30 @@ export function AgentVisualizer() {
         onDiscoveryClick={selection.handleDiscoveryClick}
         selectedDiscoveryId={selection.selectedDiscoveryId}
         showCostOverlay={showCostOverlay}
-      />
+      />}
 
       {/* Message feed panel (top-left) */}
-      <MessageFeedPanel
+      {viewMode === 'graph' && <MessageFeedPanel
         conversations={conversations}
         agents={agents}
         onAgentClick={selection.handleAgentClick}
         selectedAgentId={selection.selectedAgentId}
-      />
+      />}
+
+      {viewMode === 'tree' && <AgentTreeView
+        key={`${bridge.selectedSessionId ?? 'empty'}:${bridge.sessionResetVersion}`}
+        agents={agents}
+        selectedAgentId={selection.selectedAgentId}
+        sessionLabel={bridge.sessions.find(session => session.id === bridge.selectedSessionId)?.label}
+        conversation={selectedConversation}
+        onSelectAgent={selection.handleAgentClick}
+        loading={bridge.loadingSessionId === bridge.selectedSessionId}
+        error={bridge.replayError}
+        onRetry={() => bridge.selectSession(bridge.selectedSessionId)}
+      />}
 
       {/* Agent detail card (floating, tethered to node) */}
-      {selectedAgent && selection.selectedAgentWorldPos && (
+      {viewMode === 'graph' && selectedAgent && selection.selectedAgentWorldPos && (
         <div {...stopPropagationHandlers}>
           <AgentDetailCard
             agent={selectedAgent}
@@ -316,7 +358,7 @@ export function AgentVisualizer() {
       )}
 
       {/* Tool call detail popup */}
-      {selection.selectedToolData && selection.selectedToolScreenPos && (
+      {viewMode === 'graph' && selection.selectedToolData && selection.selectedToolScreenPos && (
         <div {...stopPropagationHandlers}>
           <ToolDetailPopup
             tool={selection.selectedToolData}
@@ -327,7 +369,7 @@ export function AgentVisualizer() {
       )}
 
       {/* Discovery detail popup */}
-      {selection.selectedDiscoveryData && selection.selectedDiscoveryScreenPos && (
+      {viewMode === 'graph' && selection.selectedDiscoveryData && selection.selectedDiscoveryScreenPos && (
         <div {...stopPropagationHandlers}>
           <DiscoveryDetailPopup
             discovery={selection.selectedDiscoveryData}
@@ -338,14 +380,14 @@ export function AgentVisualizer() {
       )}
 
       {/* Chat panel (bottom-right, shown when agent selected) */}
-      <AgentChatPanel
+      {viewMode === 'graph' && <AgentChatPanel
         visible={!!selectedAgent}
         agentName={selectedAgent?.name ?? ''}
         agentState={selectedAgent?.state ?? 'idle'}
         conversation={selectedConversation}
         runtime={selectedAgent?.runtime ?? sessionRuntime}
         onClose={selection.clearAgent}
-      />
+      />}
 
       {/* Context menu */}
       {selection.contextMenu && (
@@ -409,6 +451,14 @@ export function AgentVisualizer() {
 
       {/* Top bar: session tabs + info/controls */}
       <TopBar
+        viewMode={viewMode}
+        onChangeViewMode={mode => {
+          setViewMode(mode)
+          setShowFileAttention(false)
+          setShowTranscript(false)
+          if (mode === 'tree') setShowCostOverlay(false)
+        }}
+        onHeightChange={setHeaderHeight}
         sessions={bridge.sessions}
         selectedSessionId={bridge.selectedSessionId}
         sessionsWithActivity={bridge.sessionsWithActivity}

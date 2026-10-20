@@ -1,20 +1,30 @@
 {
-  "name": "agent-flow",
-  "displayName": "Agent Flow",
+  "name": "branchline",
+  "displayName": "Branchline",
   "description": "Real-time visualization of Claude Code and Codex agent orchestration",
   "version": "0.9.2",
-  "publisher": "simon-p",
+  "publisher": "strudeldoodles",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/patoles/agent-flow"
+    "url": "https://github.com/StrudelDoodleS/branchline"
   },
-  "icon": "media/icon.png",
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Visualization", "Other"],
-  "keywords": ["llm", "agent", "claude", "codex", "ai", "visualization", "orchestration"],
+  "categories": [
+    "Visualization",
+    "Other"
+  ],
+  "keywords": [
+    "llm",
+    "agent",
+    "claude",
+    "codex",
+    "ai",
+    "visualization",
+    "orchestration"
+  ],
   "activationEvents": [
     "onWebviewPanel:agentVisualizer"
   ],
@@ -23,23 +33,23 @@
     "commands": [
       {
         "command": "agentVisualizer.open",
-        "title": "Open Agent Flow",
-        "category": "Agent Flow"
+        "title": "Open Branchline",
+        "category": "Branchline"
       },
       {
         "command": "agentVisualizer.openToSide",
-        "title": "Open Agent Flow to Side",
-        "category": "Agent Flow"
+        "title": "Open Branchline to Side",
+        "category": "Branchline"
       },
       {
         "command": "agentVisualizer.connectToAgent",
         "title": "Connect to Running Agent",
-        "category": "Agent Flow"
+        "category": "Branchline"
       },
       {
         "command": "agentVisualizer.configureHooks",
         "title": "Configure Claude Code Hooks",
-        "category": "Agent Flow"
+        "category": "Branchline"
       }
     ],
     "keybindings": [
@@ -50,11 +60,15 @@
       }
     ],
     "configuration": {
-      "title": "Agent Flow",
+      "title": "Branchline",
       "properties": {
         "agentVisualizer.runtime": {
           "type": "string",
-          "enum": ["auto", "claude", "codex"],
+          "enum": [
+            "auto",
+            "claude",
+            "codex"
+          ],
           "enumDescriptions": [
             "Watch both Claude Code and Codex sessions concurrently (default)",
             "Watch only Claude Code sessions",
@@ -99,5 +113,10 @@
     "esbuild": "^0.20.0",
     "tsx": "^4.19.0",
     "typescript": "^5.3.0"
+  },
+  "private": true,
+  "homepage": "https://github.com/StrudelDoodleS/branchline",
+  "bugs": {
+    "url": "https://github.com/StrudelDoodleS/branchline/issues"
   }
 }

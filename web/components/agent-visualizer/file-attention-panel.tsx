@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 'use client'
 
 import { FileAttention, Z } from '@/lib/agent-types'
@@ -23,7 +24,7 @@ export function FileAttentionPanel({ visible, fileAttention, onClose, onOpenFile
   return (
     <SlidingPanel
       visible={visible}
-      position={{ top: 48, right: 12 }}
+      position={{ top: 'var(--agent-controls-bottom, 48px)', right: 12 }}
       zIndex={Z.sidePanel}
       width={260}
     >

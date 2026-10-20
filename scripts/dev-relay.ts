@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// Branchline fork modifications; see FORK.md.
 /**
  * Dev relay server — wraps the shared relay with a standalone HTTP server
  * that includes CORS headers for cross-origin dev mode (Next.js on :3000).
@@ -10,7 +11,7 @@ import { DEFAULT_RELAY_PORT, DEV_WEB_ORIGIN_PATTERN } from '../extension/src/con
 async function main() {
   const workspace = process.argv[2] || process.cwd()
 
-  console.log('Starting Agent Flow dev relay...\n')
+  console.log('Starting Branchline dev relay...\n')
   console.log(`Workspace: ${workspace}`)
 
   const relay = await createRelay({ workspace, verbose: true })
@@ -35,9 +36,12 @@ async function main() {
     if (req.url === '/events') {
       return relay.handleSSE(req, res)
     }
+    if (req.method === 'GET' && req.url?.startsWith('/session-events?')) {
+      return relay.handleSessionReplay(req, res)
+    }
 
     res.writeHead(200, { 'Content-Type': 'text/plain' })
-    res.end('Agent Flow Dev Relay')
+    res.end('Branchline Dev Relay')
   })
 
   server.listen(DEFAULT_RELAY_PORT, '127.0.0.1', () => {

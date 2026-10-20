@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 import * as vscode from 'vscode'
 import * as crypto from 'crypto'
 import {
@@ -76,7 +77,7 @@ export class VisualizerPanel implements vscode.Disposable {
 
     const panel = vscode.window.createWebviewPanel(
       VisualizerPanel.viewType,
-      'Agent Flow',
+      'Branchline',
       column,
       {
         enableScripts: true,

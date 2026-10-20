@@ -1,12 +1,13 @@
-## What does this PR do?
+## What changes?
 
-<!-- Brief description of the change -->
+Describe the problem and resulting behavior.
 
-## How to test
+## Verification
 
-<!-- Steps to verify the change works -->
+List relevant checks. Include a portrait screenshot for UI changes.
 
 ## Checklist
 
-- [ ] I have read the [CONTRIBUTING](../CONTRIBUTING.md) guide
-- [ ] I have signed the [CLA](../CLA.md)
+- [ ] Targets `phone-controls`
+- [ ] Relevant tests and type checks pass
+- [ ] Upstream attribution is preserved

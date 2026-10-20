@@ -1,6 +1,7 @@
+// Branchline fork modifications; see FORK.md.
 "use client"
 
-import { memo } from "react"
+import { memo, useLayoutEffect, useRef } from "react"
 import { Z } from "@/lib/agent-types"
 import { COLORS } from "@/lib/colors"
 import { formatTokens } from "@/lib/utils"
@@ -32,22 +33,24 @@ function UnmutedIcon() {
 
 // ─── Toggle Button ──────────────────────────────────────────────────────────
 
-function ToggleButton({ active, onClick, children, style, activeColor }: {
+function ToggleButton({ active, onClick, children, label, activeColor }: {
   active: boolean
   onClick: () => void
   children: React.ReactNode
-  style?: React.CSSProperties
+  label?: string
   activeColor?: { bg: string; text: string }
 }) {
   return (
     <button
+      type="button"
+      aria-label={label}
+      aria-pressed={active}
       onClick={onClick}
-      className="px-1.5 py-0.5 rounded transition-all"
+      className="min-h-11 min-w-11 rounded-md px-2 py-2 text-xs transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
       style={{
-        background: active ? (activeColor?.bg ?? COLORS.toggleActive) : COLORS.toggleInactive,
-        border: `1px solid ${COLORS.toggleBorder}`,
-        color: active ? (activeColor?.text ?? COLORS.holoBright) : COLORS.textMuted,
-        ...style,
+        background: active ? (activeColor?.bg ?? '#164e63') : '#1e293b',
+        border: '1px solid #64748b',
+        color: active ? (activeColor?.text ?? '#ecfeff') : '#e2e8f0',
       }}
     >
       {children}
@@ -77,6 +80,9 @@ function ConnectionIndicator({ status }: { status: ConnectionStatus }) {
 // ─── Top Bar ────────────────────────────────────────────────────────────────
 
 export interface TopBarProps {
+  viewMode: 'tree' | 'graph'
+  onChangeViewMode: (mode: 'tree' | 'graph') => void
+  onHeightChange: (height: number) => void
   // Session tabs
   sessions: SessionInfo[]
   selectedSessionId: string | null
@@ -101,6 +107,7 @@ export interface TopBarProps {
 }
 
 export const TopBar = memo(function TopBar({
+  viewMode, onChangeViewMode, onHeightChange,
   sessions, selectedSessionId, sessionsWithActivity,
   onSelectSession, onCloseSession,
   isVSCode, connectionStatus,
@@ -108,11 +115,29 @@ export const TopBar = memo(function TopBar({
   showFileAttention, showTranscript, showCostOverlay, showTimeline, isMuted,
   onTogglePanel, onToggleTimeline, onToggleMute,
 }: TopBarProps) {
+  const headerRef = useRef<HTMLDivElement>(null)
+
+  useLayoutEffect(() => {
+    const header = headerRef.current
+    if (!header) return
+    const updateHeight = () => onHeightChange(Math.ceil(header.getBoundingClientRect().height))
+    updateHeight()
+    const observer = new ResizeObserver(updateHeight)
+    observer.observe(header)
+    return () => observer.disconnect()
+  }, [onHeightChange])
+
   return (
-    <div className="absolute top-3 left-3 right-3 flex items-center gap-4 font-mono text-[10px]" style={{ zIndex: Z.info }}>
+    <div
+      ref={headerRef}
+      role="region"
+      aria-label="Agent controls"
+      className="absolute top-3 left-3 right-3 flex flex-col gap-2 rounded-lg border p-3 font-mono"
+      style={{ zIndex: Z.info, background: '#0f172a', borderColor: '#475569', color: '#e2e8f0' }}
+    >
       {/* Session tabs — scrollable, takes available space */}
-      {sessions.length > 1 && (
-        <div className="min-w-0 flex-shrink overflow-x-auto scrollbar-hide">
+      {sessions.length > 0 && (
+        <div className="min-w-0 w-full">
           <SessionTabs
             sessions={sessions}
             selectedSessionId={selectedSessionId}
@@ -123,40 +148,36 @@ export const TopBar = memo(function TopBar({
         </div>
       )}
 
-      {/* Spacer pushes info to the right */}
-      <div className="flex-1" />
-
-      {/* Right-side info/controls */}
-      <div className="flex items-center gap-4 flex-shrink-0" style={{ color: COLORS.textMuted }}>
-        {isVSCode && <ConnectionIndicator status={connectionStatus} />}
-        <span>{agentCount} agents</span>
-        <span>
-          {formatTokens(totalTokens)} tokens
-          <span style={{ color: COLORS.complete + '65', marginLeft: 4 }}>
-            ~${agentCost(totalTokens).toFixed(2)}
-          </span>
-        </span>
-
-        {/* Mutually exclusive panel group */}
-        <div className="flex items-center gap-1 px-1 py-0.5 rounded" style={{
-          background: COLORS.holoBg03,
-          border: `1px solid ${COLORS.holoBorder06}`,
-        }}>
-          <ToggleButton active={showFileAttention} onClick={() => onTogglePanel('files')} style={{ background: showFileAttention ? undefined : 'transparent', border: 'none' }}>Files</ToggleButton>
-          <ToggleButton active={showTranscript} onClick={() => onTogglePanel('transcript')} style={{ background: showTranscript ? undefined : 'transparent', border: 'none' }}>Chat</ToggleButton>
-          <ToggleButton
-            active={showCostOverlay}
-            onClick={() => onTogglePanel('cost')}
-            activeColor={{ bg: COLORS.costActiveBg, text: COLORS.complete }}
-            style={{ background: showCostOverlay ? undefined : 'transparent', border: 'none' }}
-          >
-            $Cost
-          </ToggleButton>
+      <div className="flex min-w-0 flex-wrap items-center gap-2 sm:gap-4">
+        <div role="group" aria-label="View" className="flex gap-1">
+          <ToggleButton active={viewMode === 'tree'} onClick={() => onChangeViewMode('tree')}>Tree</ToggleButton>
+          <ToggleButton active={viewMode === 'graph'} onClick={() => onChangeViewMode('graph')}>Graph</ToggleButton>
         </div>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs" style={{ color: '#cbd5e1' }}>
+          <ConnectionIndicator status={connectionStatus} />
+          <span>{agentCount} agents</span>
+          <span>
+            {formatTokens(totalTokens)} tokens
+            <span style={{ color: '#86efac', marginLeft: 6 }}>
+              ~${agentCost(totalTokens).toFixed(2)}
+            </span>
+          </span>
+        </div>
+      </div>
 
+      <div className="flex flex-wrap items-center gap-2">
+        <ToggleButton active={showFileAttention} onClick={() => onTogglePanel('files')}>Files</ToggleButton>
+        <ToggleButton active={showTranscript} onClick={() => onTogglePanel('transcript')}>Chat</ToggleButton>
+        <ToggleButton
+          active={showCostOverlay}
+          onClick={() => onTogglePanel('cost')}
+          activeColor={{ bg: '#14532d', text: '#dcfce7' }}
+        >
+          $Cost
+        </ToggleButton>
         {/* Independent toggles */}
         <ToggleButton active={showTimeline} onClick={onToggleTimeline}>Timeline</ToggleButton>
-        <ToggleButton active={!isMuted} onClick={onToggleMute} style={{ border: `1px solid ${COLORS.toggleBorder}` }}>
+        <ToggleButton active={!isMuted} onClick={onToggleMute} label={isMuted ? 'Enable sound' : 'Mute sound'}>
           {isMuted ? <MutedIcon /> : <UnmutedIcon />}
         </ToggleButton>
       </div>
