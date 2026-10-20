@@ -36,6 +36,8 @@ export interface Agent {
   /** Model ID last reported for this agent (agent_spawn / model_detected).
    *  Drives context-window sizing and the per-family cost rate. */
   model?: string
+  /** Configured effort explicitly reported by this agent's runtime. */
+  reasoningEffort?: string
   currentTool?: string
   task?: string
   spawnTime: number

@@ -146,6 +146,17 @@ describe('subagent transcript lifecycle', () => {
     finally { f.close() }
   })
 
+  it('reads effort changes from child files while inline progress supplies the messages', () => {
+    const f = fixture([{ ...pending, effort: 'high' }])
+    try {
+      f.session.inlineProgressAgents.add('Researcher')
+      const before = ofType(f.events, 'message').length
+      f.append({ ...response('working', null), perTurnEffort: 'xhigh' })
+      assert.equal(ofType(f.events, 'model_detected').at(-1)?.payload.reasoningEffort, 'xhigh')
+      assert.equal(ofType(f.events, 'message').length, before)
+    } finally { f.close() }
+  })
+
   it('restores an interrupted subagent as done despite unmatched tools', () => {
     const f = fixture([pending, { type: 'user', message: { role: 'user', content: [{ type: 'text', text: '[Request interrupted by user]' }] } }])
     try { assert.deepEqual(f.lifecycle(), ['agent_spawn', 'agent_complete']) }
@@ -256,6 +267,26 @@ describe('Claude cumulative API usage', () => {
       usage: { input_tokens: 10, cache_read_input_tokens: 1000, cache_creation_input_tokens: 300,
         cache_creation: { ephemeral_5m_input_tokens: 100, ephemeral_1h_input_tokens: 200 }, output_tokens: output,
         output_tokens_details: { thinking_tokens: 40 } } },
+  })
+
+  it('reports per-turn effort, keeps partial metadata, ignores old responses, and clears new unreported levels', () => {
+    const { session, events, feed } = setup()
+    feed({ ...response('first'), effort: 'high', perTurnEffort: 'xhigh' })
+    feed(response('first', 120)) // another block of the same response omits metadata
+    feed({ ...response('first', 130), effort: 'high' }) // a general setting cannot replace a missing per-turn override
+    assert.equal(events.filter(event => event.type === 'model_detected').length, 1)
+    assert.equal(session.modelSettingsByAgent?.get('orchestrator')?.reasoningEffort, 'xhigh')
+    feed({ ...response('first', 140), perTurnEffort: null }) // explicitly clearing the override restores the general level
+    assert.equal(session.modelSettingsByAgent?.get('orchestrator')?.reasoningEffort, 'high')
+    feed({ ...response('first', 150), effort: null })
+    assert.equal(session.modelSettingsByAgent?.get('orchestrator')?.reasoningEffort, undefined)
+    feed({ ...response('second'), effort: 'high' })
+    feed({ ...response('first'), effort: 'high', perTurnEffort: 'xhigh' }) // old replay
+    feed(response('third', 100, 'claude-sonnet-5-5'))
+    const metadata = events.filter(event => event.type === 'model_detected')
+    assert.deepEqual(metadata.map(event => event.payload.reasoningEffort), ['xhigh', 'high', null, 'high', null])
+    assert.equal(session.model, 'claude-sonnet-5-5')
+    assert.equal(session.modelDetectedAgents.get('orchestrator'), 'claude-sonnet-5-5')
   })
 
   it('restores original response dates for cost history instead of attach time', () => {
@@ -569,7 +600,7 @@ describe('subagent model (#91)', () => {
     feed(agentToolUse('toolu_1', 'Find callers'))
     feed(agentToolResult('toolu_1', asyncLaunch('<synthetic>')))
 
-    assert.deepEqual(ofType(events, 'model_detected').map(e => e.payload), [{ agent: 'orchestrator', model: 'claude-opus-5-5' }])
+    assert.deepEqual(ofType(events, 'model_detected').map(e => e.payload), [{ agent: 'orchestrator', model: 'claude-opus-5-5', reasoningEffort: null }])
     assert.equal(session.modelDetectedAgents.get('orchestrator'), 'claude-opus-5-5')
   })
 

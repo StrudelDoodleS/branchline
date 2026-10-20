@@ -9,6 +9,7 @@ import { formatTokens } from '@/lib/utils'
 import type { ConversationMessage } from '@/hooks/simulation/types'
 import { useAutoScroll } from '@/hooks/use-auto-scroll'
 import { TranscriptMessage } from './transcript-message'
+import { AgentModelMetadata } from './agent-model-metadata'
 
 const STATE_LABELS: Record<AgentState, string> = {
   idle: 'Idle', thinking: 'Thinking', tool_calling: 'Using tools',
@@ -121,7 +122,10 @@ export function AgentTreeView({ agents, selectedAgentId, sessionLabel, conversat
             style={{ background: isSelected ? '#164e63' : undefined }}
             onClick={() => onSelectAgent(agent.id)}
           >
-            <span className={`min-w-0 flex-1 truncate ${agent.isMain ? 'font-semibold text-cyan-100' : ''}`}>{label}</span>
+            <span className="min-w-0 flex-1">
+              <span className={`block truncate ${agent.isMain ? 'font-semibold text-cyan-100' : ''}`}>{label}</span>
+              <AgentModelMetadata model={agent.model} reasoningEffort={agent.reasoningEffort} compact />
+            </span>
             <span className="flex shrink-0 items-center gap-1.5 text-[10px] text-slate-300">
               <span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: getStateColor(agent.state) }} />
               <span aria-hidden="true">{SHORT_STATE_LABELS[agent.state]}</span>
@@ -187,6 +191,7 @@ function AgentActivity({ agent, conversation, onClose }: { agent: Agent; convers
       <div className="flex shrink-0 items-start justify-between gap-2">
         <div className="min-w-0">
           <h2 className="break-words text-sm font-semibold [overflow-wrap:anywhere]">{agent.name}</h2>
+          <AgentModelMetadata model={agent.model} reasoningEffort={agent.reasoningEffort} />
           <p className="mt-1 text-xs text-slate-300">{STATE_LABELS[agent.state]}{agent.currentTool ? ` · ${agent.currentTool}` : ''}</p>
         </div>
         <button type="button" aria-label="Close agent activity" className={`${buttonClass} shrink-0 bg-slate-800`} onClick={onClose}>✕</button>

@@ -12,7 +12,7 @@
 
 import * as fs from 'fs'
 import * as path from 'path'
-import { AgentEvent, SubagentState, WatchedSession, TranscriptEntry, emitSubagentSpawn, markSubagentCompleted } from './protocol'
+import { AgentEvent, SubagentState, WatchedSession, TranscriptEntry, emitSubagentSpawn, markSubagentCompleted, modelSettingsFields } from './protocol'
 import { SESSION_ID_DISPLAY, ORCHESTRATOR_NAME, INACTIVITY_TIMEOUT_MS, generateSubagentFallbackName, resolveSubagentChildName } from './constants'
 import { readNewFileLines } from './fs-utils'
 import { TranscriptParser } from './transcript-parser'
@@ -153,7 +153,6 @@ function startWatchingSubagentFile(
   // Restore the latest conversation turn, excluding API request blobs, which
   // can contain copies of old tools. Keep partial lines for the next read.
   const pendingToolUseIds = new Set<string>()
-  let lastModel: string | undefined
   let finishedTurn = false
   let latestActivityTime = 0
   try {
@@ -167,7 +166,7 @@ function startWatchingSubagentFile(
           if (!isConversationEntry(raw)) continue
           latestActivityTime = Math.max(latestActivityTime, Date.parse(raw.timestamp ?? '') || 0)
           parser.recordAssistantUsage(raw, agentName, session)
-          if (raw.type === 'assistant' && raw.message.model && !raw.message.model.startsWith('<')) lastModel = raw.message.model
+          parser.recordAssistantSettings(raw, agentName, session)
           const turn = trackTurn(raw, state)
           if (turn !== null) finishedTurn = turn === 'complete'
           if (Array.isArray(raw.message.content)) {
@@ -202,8 +201,9 @@ function startWatchingSubagentFile(
     // Restore identity before usage even when that name was already reserved.
     if (alreadySpawned) delegate.emit({ time: delegate.elapsed(sessionId), type: 'agent_spawn',
       payload: { name: agentName, parent: ORCHESTRATOR_NAME, task: agentName } }, sessionId)
+    const modelFields = modelSettingsFields(session, agentName)
+    if (modelFields.model) delegate.emit({ time: delegate.elapsed(sessionId), type: 'model_detected', payload: { agent: agentName, ...modelFields } }, sessionId)
     if (hasUsage) {
-      if (lastModel) delegate.emit({ time: delegate.elapsed(sessionId), type: 'model_detected', payload: { agent: agentName, model: lastModel } }, sessionId)
       delegate.emit({ time: delegate.elapsed(sessionId), type: 'context_update', payload: claudeContextPayload(session, agentName) }, sessionId)
     }
   }
@@ -262,6 +262,10 @@ export function readSubagentNewLines(
     // owns turn boundaries and final usage, which can arrive later.
     if (inline) {
       parser.recordAssistantUsage(entry, state.agentName, session)
+      if (parser.recordAssistantSettings(entry, state.agentName, session)) {
+        delegate.emit({ time: delegate.elapsed(sessionId), type: 'model_detected',
+          payload: { agent: state.agentName, ...modelSettingsFields(session, state.agentName) } }, sessionId)
+      }
     } else {
       parser.processTranscriptLine(line, state.agentName, state.pendingToolCalls, state.seenToolUseIds, sessionId)
     }

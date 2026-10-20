@@ -3,7 +3,7 @@ import * as vscode from 'vscode'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
-import { AgentEvent, SessionInfo, WatchedSession } from './protocol'
+import { AgentEvent, SessionInfo, WatchedSession, modelSettingsFields } from './protocol'
 import {
   INACTIVITY_TIMEOUT_MS, SCAN_INTERVAL_MS, ACTIVE_SESSION_AGE_S, POLL_FALLBACK_MS,
   SESSION_ID_DISPLAY, SYSTEM_PROMPT_BASE_TOKENS, ORCHESTRATOR_NAME,
@@ -121,24 +121,23 @@ export class SessionWatcher implements AgentSessionWatcher {
           name: ORCHESTRATOR_NAME,
           isMain: true,
           task: session.label,
-          ...(session.model ? { model: session.model } : {}),
+          ...modelSettingsFields(session, ORCHESTRATOR_NAME),
         },
       }, sessionId)
 
       for (const [, sub] of session.subagentWatchers) {
         if (session.spawnedSubagents.has(sub.agentName)) {
-          const model = session.modelDetectedAgents.get(sub.agentName)
           this.emit({ time: 0, type: 'subagent_dispatch', payload: { parent: ORCHESTRATOR_NAME, child: sub.agentName, task: sub.agentName } }, sessionId)
-          this.emit({ time: 0, type: 'agent_spawn', payload: { name: sub.agentName, parent: ORCHESTRATOR_NAME, task: sub.agentName, ...(model ? { model } : {}) } }, sessionId)
+          this.emit({ time: 0, type: 'agent_spawn', payload: { name: sub.agentName, parent: ORCHESTRATOR_NAME, task: sub.agentName, ...modelSettingsFields(session, sub.agentName) } }, sessionId)
         }
         sub.spawnEmitted = false
       }
 
-      for (const [agent, model] of session.modelDetectedAgents) {
+      for (const agent of session.modelDetectedAgents.keys()) {
         this.emit({
           time: 0,
           type: 'model_detected',
-          payload: { agent, model },
+          payload: { agent, ...modelSettingsFields(session, agent) },
         }, sessionId)
       }
 
@@ -445,7 +444,7 @@ export class SessionWatcher implements AgentSessionWatcher {
         name: ORCHESTRATOR_NAME,
         isMain: true,
         task: session.label,
-        ...(session.model ? { model: session.model } : {}),
+        ...modelSettingsFields(session, ORCHESTRATOR_NAME),
       },
     }, sessionId)
     session.sessionDetected = true
@@ -525,7 +524,7 @@ export class SessionWatcher implements AgentSessionWatcher {
           name: ORCHESTRATOR_NAME,
           isMain: true,
           task: session.label,
-          ...(session.model ? { model: session.model } : {}),
+          ...modelSettingsFields(session, ORCHESTRATOR_NAME),
         },
       }, sessionId)
       this._onSessionLifecycle.fire({ type: 'started', sessionId, label: session.label })

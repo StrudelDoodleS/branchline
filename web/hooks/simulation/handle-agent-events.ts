@@ -21,6 +21,7 @@ export function handleAgentSpawn(
   const isMain = asBoolean(payload.isMain)
   const task = typeof payload.task === 'string' ? payload.task : undefined
   const model = typeof payload.model === 'string' ? payload.model : undefined
+  const reasoningEffort = typeof payload.reasoningEffort === 'string' && payload.reasoningEffort.trim() ? payload.reasoningEffort.trim() : undefined
   const runtime = payload.runtime === 'codex' ? 'codex' as const : undefined
 
   // If the agent already exists (e.g. session resuming after inactivity),
@@ -32,7 +33,8 @@ export function handleAgentSpawn(
       state: 'idle',
       ...(payload.displayName ? { name: displayName } : {}),
       ...(task ? { task } : {}),
-      ...(model ? { model, tokensMax: ctx.getContextWindowSize(model) } : {}),
+      ...(model ? { model, tokensMax: model === existing.model ? existing.tokensMax : ctx.getContextWindowSize(model) } : {}),
+      reasoningEffort: 'reasoningEffort' in payload ? reasoningEffort : model && model !== existing.model ? undefined : existing.reasoningEffort,
       ...(runtime ? { runtime } : {}),
     })
     if (!ctx.skipForceSync) setTimeout(() => ctx.syncForceSimulation(state.agents, state.edges), 0)
@@ -87,6 +89,7 @@ export function handleAgentSpawn(
     pinned: false, isMain,
     ...(runtime ? { runtime } : {}),
     ...(model ? { model } : {}),
+    reasoningEffort,
     task,
     spawnTime: currentTime,
     opacity: 0, scale: 0.3,
@@ -198,7 +201,10 @@ export function handleModelDetected(
     state.agents.set(agentName, {
       ...agent,
       model,
-      tokensMax: ctx.getContextWindowSize(model),
+      reasoningEffort: 'reasoningEffort' in payload
+        ? typeof payload.reasoningEffort === 'string' && payload.reasoningEffort.trim() ? payload.reasoningEffort.trim() : undefined
+        : model !== agent.model ? undefined : agent.reasoningEffort,
+      tokensMax: model === agent.model ? agent.tokensMax : ctx.getContextWindowSize(model),
     })
   }
 }

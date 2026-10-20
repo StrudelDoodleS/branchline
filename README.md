@@ -8,6 +8,7 @@ Branchline is an independent fork of [Agent Flow](https://github.com/patoles/age
 
 - A main-session dropdown instead of a scrolling row of sessions.
 - A compact file tree with expand/collapse, Active/Done/All filters, and agent activity below it on phones. Active is the default; your filter choice is remembered.
+- Each tree row shows the recorded model and reasoning effort. Agent details show the full model ID; unreported effort stays explicit. Claude per-turn effort and Codex turn settings update independently for each agent.
 - Codex subagents grouped under their actual parent conversation, including nested agents.
 - Session history loading and reconnect recovery that preserve agent identities and newer live events.
 - Readable controls, portrait-safe panels, and activity logs that respect your scroll position.

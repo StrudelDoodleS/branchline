@@ -31,6 +31,7 @@ test(`Claude lifecycle restores and finishes correctly via ${finishSource}`, asy
   const child = path.join(subdir, 'agent-test.jsonl')
   fs.writeFileSync(child.replace('.jsonl', '.meta.json'), JSON.stringify({ description: 'Researcher' }))
   fs.writeFileSync(child, JSON.stringify({ type: 'assistant', uuid: 'pending',
+    effort: 'high',
     timestamp: finishSource === 'resumed child' ? '2026-10-18T00:00:02Z' : '2026-10-18T00:00:00Z',
     message: { id: 'pending', role: 'assistant', model: 'claude-opus-5-5', stop_reason: 'tool_use',
       usage: { input_tokens: 10, output_tokens: 10 }, content: [
@@ -56,6 +57,11 @@ test(`Claude lifecycle restores and finishes correctly via ${finishSource}`, asy
   try {
     // Attach directly to this controlled transcript, without scanning user files.
     ;(watcher as unknown as { watchSession(id: string, file: string): void }).watchSession(sessionId, main)
+    if (!lateDiscovery) {
+      const metadata = events.filter(event => event.type === 'model_detected' && event.payload.agent === 'Researcher').at(-1)
+      assert.equal(metadata?.payload.model, 'claude-opus-5-5')
+      assert.equal(metadata?.payload.reasoningEffort, 'high')
+    }
     if (lateDiscovery) {
       fs.appendFileSync(main, parentFinish.map(entry => JSON.stringify(entry)).join('\n') + '\n')
       for (let attempt = 0; attempt < 100 && !events.some(event => event.type === 'agent_complete' && event.payload.name === 'Researcher'); attempt++) {
@@ -126,10 +132,17 @@ test('completed Claude cost histories do not acquire a growing idle tail', conte
   const file = path.join(directory, id + '.jsonl')
   const ended = now - 86400000
   fs.writeFileSync(file, JSON.stringify({ type: 'assistant', timestamp: new Date(ended).toISOString(),
+    effort: 'high', perTurnEffort: 'xhigh',
     message: { id: 'priced', role: 'assistant', model: 'claude-opus-5-5', stop_reason: 'end_turn',
       usage: { input_tokens: 1000, output_tokens: 100 }, content: [{ type: 'text', text: 'Finished' }] } }) + '\n')
   try {
+    const metadataEvents: AgentEvent[] = []
+    watcher.onEvent(event => metadataEvents.push(event))
     ;(watcher as unknown as { watchSession(id: string, file: string): void }).watchSession(id, file)
+    assert.equal(metadataEvents.find(event => event.type === 'agent_spawn' && event.payload.isMain)?.payload.reasoningEffort, 'xhigh')
+    metadataEvents.length = 0
+    watcher.replaySessionStart([id])
+    assert.equal(metadataEvents.find(event => event.type === 'model_detected')?.payload.reasoningEffort, 'xhigh')
     assert.equal(watcher.getCostHistory(id)!.burnRate.endTimestamp, now)
     context.mock.timers.tick(5 * 60000 + 1)
     assert.equal(watcher.getActiveSessions()[0].status, 'completed')

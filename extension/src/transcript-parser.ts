@@ -9,7 +9,7 @@
 import {
   AgentEvent, PendingToolCall, WatchedSession,
   TranscriptEntry, ToolUseBlock, ToolResultBlock,
-  emitSubagentSpawn, markSubagentCompleted,
+  emitSubagentSpawn, markSubagentCompleted, modelSettingsFields,
 } from './protocol'
 import { readFileChunk } from './fs-utils'
 import {
@@ -197,6 +197,8 @@ export class TranscriptParser {
       type: parsed.type as string,
       uuid: parsed.uuid as string | undefined,
       timestamp: typeof parsed.timestamp === 'string' ? parsed.timestamp : undefined,
+      effort: typeof parsed.effort === 'string' || parsed.effort === null ? parsed.effort : undefined,
+      perTurnEffort: typeof parsed.perTurnEffort === 'string' || parsed.perTurnEffort === null ? parsed.perTurnEffort : undefined,
       message: msg,
     }
 
@@ -221,13 +223,11 @@ export class TranscriptParser {
 
     // Extract model from assistant messages (updates tokensMax on the frontend).
     // Per-agent tracking: re-emit when the model changes (e.g. /model switch).
-    if (session && entry.type === 'assistant' && isRealModelId(msg.model) && session.modelDetectedAgents.get(agentName) !== msg.model) {
-      session.modelDetectedAgents.set(agentName, msg.model)
-      if (!session.model) session.model = msg.model
+    if (session && this.recordAssistantSettings(entry, agentName, session)) {
       this.delegate.emit({
         time: this.delegate.elapsed(sessionId),
         type: 'model_detected',
-        payload: { agent: agentName, model: msg.model },
+        payload: { agent: agentName, ...modelSettingsFields(session, agentName) },
       }, sessionId)
     }
 
@@ -278,6 +278,32 @@ export class TranscriptParser {
     }
 
     if (session) { this.delegate.emitContextUpdate(agentName, session, sessionId) }
+  }
+
+  /** Store actual per-agent settings; old response replays must not regress them. */
+  recordAssistantSettings(entry: TranscriptEntry, agentName: string, session: WatchedSession): boolean {
+    if (entry.type !== 'assistant' || !isRealModelId(entry.message?.model)) return false
+    const responseId = entry.message.id || entry.uuid
+    const context = session.contextResponsesByAgent?.get(agentName)
+    if (responseId && context?.seen.has(responseId) && context.current !== responseId) return false
+    const old = session.modelSettingsByAgent?.get(agentName)
+    const timestamp = Date.parse(entry.timestamp ?? '')
+    if (old?.timestamp !== undefined && Number.isFinite(timestamp) && timestamp < old.timestamp) return false
+    const sameResponse = !!responseId && old?.responseId === responseId
+    // Streamed blocks can repeat the general level but omit a known per-turn
+    // override. Merge each source within this response before choosing priority;
+    // null explicitly clears a source, and a new response starts fresh.
+    const effort = entry.effort === undefined && sameResponse ? old?.effort : entry.effort?.trim() || undefined
+    const perTurnEffort = entry.perTurnEffort === undefined && sameResponse ? old?.perTurnEffort : entry.perTurnEffort?.trim() || undefined
+    const reasoningEffort = perTurnEffort || effort
+    const model = entry.message.model
+    const changed = old?.model !== model || old?.reasoningEffort !== reasoningEffort
+    session.modelSettingsByAgent ??= new Map()
+    session.modelSettingsByAgent.set(agentName, { model, reasoningEffort, effort, perTurnEffort, responseId,
+      timestamp: Number.isFinite(timestamp) ? timestamp : old?.timestamp })
+    session.modelDetectedAgents.set(agentName, model)
+    if (agentName === ORCHESTRATOR_NAME) session.model = model
+    return changed
   }
 
   /** Used by live parsing and both main/subagent attach scans. */
@@ -584,6 +610,7 @@ export class TranscriptParser {
         try {
           const entry = JSON.parse(line.trim()) as TranscriptEntry & { toolUseResult?: unknown }
           this.recordAssistantUsage(entry, ORCHESTRATOR_NAME, session)
+          this.recordAssistantSettings(entry, ORCHESTRATOR_NAME, session)
           if (entry.type === 'custom-title' && typeof entry.customTitle === 'string' && entry.customTitle.trim()) {
             session.label = entry.customTitle.trim()
             session.labelSet = true
@@ -660,10 +687,6 @@ export class TranscriptParser {
               session.seenMessageHashes.add(hashKey)
               session.contextBreakdown.userMessages += estimateTokensFromText(text)
             }
-          }
-          // Extract model from first assistant message
-          if (entry.type === 'assistant' && isRealModelId(entry.message?.model) && !session.model) {
-            session.model = entry.message.model
           }
           // Collect emittable entries (user and assistant turns)
           if (entry.type === 'user' || entry.type === 'assistant') {

@@ -120,6 +120,18 @@ describe('Codex cumulative API usage', () => {
 })
 
 describe('CodexRolloutParser', () => {
+  it('reports per-turn reasoning changes and clears unreported levels without changing the model', () => {
+    const events: AgentEvent[] = []
+    const parser = new CodexRolloutParser({ emit: event => events.push(event), elapsed: () => 0 })
+    const state = createCodexRolloutState()
+    for (const effort of ['max', 'high', 'high', null]) {
+      parser.processLine(JSON.stringify({ type: 'turn_context', payload: { model: 'gpt-6.1-sol', effort } }), state)
+    }
+    const metadata = events.filter(event => event.type === 'model_detected')
+    assert.deepEqual(metadata.map(event => event.payload.reasoningEffort), ['max', 'high', null])
+    assert.ok(metadata.every(event => event.payload.model === 'gpt-6.1-sol'))
+  })
+
   it('emits agent_spawn exactly once on the first record', () => {
     const { events } = runFixture()
     const spawns = events.filter(e => e.type === 'agent_spawn')

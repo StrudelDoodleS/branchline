@@ -68,6 +68,7 @@ export interface CodexRolloutState {
   usage: CodexUsageTracker
   /** Model id from the most recent turn_context. Authoritative. */
   model: string | null
+  reasoningEffort: string | null
   /** Cwd from session_meta, updated by turn_context. */
   cwd: string | null
   /** Label for the session (set from first non-system user message). */
@@ -92,6 +93,7 @@ export function createCodexRolloutState(): CodexRolloutState {
   return {
     usage: new CodexUsageTracker(),
     model: null,
+    reasoningEffort: null,
     cwd: null,
     label: null,
     pendingToolCalls: new Map(),
@@ -175,6 +177,8 @@ interface SessionMetaPayload {
 
 interface TurnContextPayload {
   model?: string
+  effort?: string | null
+  reasoning_effort?: string | null
   cwd?: string
   personality?: string
 }
@@ -332,13 +336,17 @@ export class CodexRolloutParser {
   private handleTurnContext(payload: TurnContextPayload | undefined, state: CodexRolloutState): void {
     if (!payload) return
     if (typeof payload.cwd === 'string') state.cwd = payload.cwd
-    if (typeof payload.model === 'string' && payload.model !== state.lastEmittedModel) {
-      state.model = payload.model
-      state.lastEmittedModel = payload.model
+    const model = typeof payload.model === 'string' && payload.model ? payload.model : state.model
+    const reported = payload.effort ?? payload.reasoning_effort
+    const reasoningEffort = typeof reported === 'string' && reported.trim() ? reported.trim() : null
+    if (model && (model !== state.lastEmittedModel || reasoningEffort !== state.reasoningEffort)) {
+      state.model = model
+      state.reasoningEffort = reasoningEffort
+      state.lastEmittedModel = model
       this.delegate.emit({
         time: this.delegate.elapsed(),
         type: 'model_detected',
-        payload: { agent: ORCHESTRATOR_NAME, model: payload.model },
+        payload: { agent: ORCHESTRATOR_NAME, model, reasoningEffort },
       })
     }
   }

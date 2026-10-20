@@ -10,7 +10,7 @@ import * as path from 'path'
 import * as os from 'os'
 
 import { HookServer } from '../extension/src/hook-server'
-import { AgentEvent, SessionInfo, WatchedSession } from '../extension/src/protocol'
+import { AgentEvent, SessionInfo, WatchedSession, modelSettingsFields } from '../extension/src/protocol'
 import { TranscriptParser } from '../extension/src/transcript-parser'
 import { readNewFileLines, foldPathCase } from '../extension/src/fs-utils'
 import { scanSubagentsDir, readSubagentNewLines } from '../extension/src/subagent-watcher'
@@ -162,7 +162,7 @@ function resetInactivityTimer(sessionId: string) {
     broadcastEvent({
       time: elapsed(sessionId),
       type: 'agent_spawn',
-      payload: { name: ORCHESTRATOR_NAME, isMain: true, task: session.label, ...(session.model ? { model: session.model } : {}) },
+      payload: { name: ORCHESTRATOR_NAME, isMain: true, task: session.label, ...modelSettingsFields(session, ORCHESTRATOR_NAME) },
       sessionId,
     })
     broadcastSessionLifecycle('started', sessionId, session.label)
@@ -219,7 +219,7 @@ function watchSession(sessionId: string, filePath: string) {
   broadcastSessionLifecycle('started', sessionId, session.label)
   broadcastEvent({
     time: 0, type: 'agent_spawn',
-    payload: { name: ORCHESTRATOR_NAME, isMain: true, task: session.label, ...(session.model ? { model: session.model } : {}) },
+    payload: { name: ORCHESTRATOR_NAME, isMain: true, task: session.label, ...modelSettingsFields(session, ORCHESTRATOR_NAME) },
     sessionId,
   })
   session.sessionDetected = true

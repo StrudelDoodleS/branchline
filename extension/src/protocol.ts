@@ -73,6 +73,8 @@ export type WebviewToExtensionMessage =
 export interface TranscriptEntry {
   customTitle?: string
   timestamp?: string
+  effort?: string | null
+  perTurnEffort?: string | null
   sessionId: string
   type: string
   uuid?: string
@@ -219,6 +221,14 @@ export interface WatchedSession {
   model: string | null
   /** Maps agent names to their last emitted model ID — re-emits on model change */
   modelDetectedAgents: Map<string, string>
+  modelSettingsByAgent?: Map<string, {
+    model: string
+    reasoningEffort?: string
+    effort?: string
+    perTurnEffort?: string
+    responseId?: string
+    timestamp?: number
+  }>
   /** Latest reported context size, independently for each Claude agent. */
   contextTokensByAgent?: Map<string, number>
   contextResponsesByAgent?: Map<string, { current: string; seen: Set<string> }>
@@ -232,6 +242,13 @@ export interface WatchedSession {
     reasoning: number
     subagentResults: number
   }
+}
+
+/** Share recorded model metadata across live events and historical replays. */
+export function modelSettingsFields(session: WatchedSession, agent: string) {
+  const settings = session.modelSettingsByAgent?.get(agent)
+  const model = settings?.model ?? session.modelDetectedAgents.get(agent)
+  return { ...(model ? { model } : {}), reasoningEffort: settings?.reasoningEffort ?? null }
 }
 
 // ─── Claude Settings Types ──────────────────────────────────────────────────

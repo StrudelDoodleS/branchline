@@ -497,6 +497,44 @@ async def cost_burn_breakdown(page):
         await page.screenshot(path='/tmp/branchline-burn-phone.png')
 
 
+async def agent_model_settings(page):
+    async def send(payloads, first_id):
+        events = [dict(type='model_detected', payload=payload, time=4+i/10, sessionId='phone-primary', eventId=first_id+i, streamId='phone-fixture') for i,payload in enumerate(payloads)]
+        await page.evaluate("events => window.postMessage({type:'agent-event-batch',events},'*')", events)
+    await send([
+        dict(agent='Orchestrator', model='claude-opus-5-5', reasoningEffort='xhigh'),
+        dict(agent='Reviewer', model='claude-opus-5-5', reasoningEffort='high'),
+        dict(agent='Implementer', model='gpt-6.1-sol', reasoningEffort='max'),
+        dict(agent='Test runner', model='gpt-6.1-sol', reasoningEffort=None),
+    ], 2000)
+    tree = page.get_by_role('navigation', name='Session agent tree')
+    await expect(tree.get_by_role('button', name='Monitor main session', exact=True)).to_contain_text('Opus 5.5 · xhigh')
+    reviewer = tree.get_by_role('button', name='Monitor Reviewer', exact=True)
+    await expect(reviewer).to_contain_text('Opus 5.5 · high')
+    await expect(tree.get_by_role('button', name='Monitor Implementer', exact=True)).to_contain_text('GPT-6.1-sol · max')
+    await expect(tree.get_by_role('button', name='Monitor Test runner', exact=True)).to_contain_text('effort unreported')
+    await reviewer.click()
+    details = page.get_by_role('region', name='Agent activity')
+    await expect(details).to_contain_text('Model: claude-opus-5-5')
+    await expect(details).to_contain_text('Reasoning: high')
+    await send([dict(agent='Reviewer', model='claude-opus-5-5', reasoningEffort='xhigh')], 2100)
+    await expect(details).to_contain_text('Reasoning: xhigh')
+    await send([dict(agent='Reviewer', model='claude-opus-5-5', reasoningEffort=None)], 2200)
+    await expect(details).to_contain_text('Reasoning: unreported')
+    await send([dict(agent='Reviewer', model='gpt-6.1-sol', reasoningEffort='ultra')], 2300)
+    await expect(details).to_contain_text('Model: gpt-6.1-sol')
+    await expect(details).to_contain_text('Reasoning: ultra')
+    for row in await tree.get_by_role('button').all():
+        box = await row.bounding_box()
+        assert box and box['height'] >= 44
+        assert box['x'] >= 0 and box['x']+box['width'] <= page.viewport_size['width']
+    assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    if page.viewport_size['width'] == 390:
+        await page.screenshot(path='/tmp/branchline-model-settings-phone.png')
+    await page.get_by_role('combobox', name='Main session').select_option('phone-other')
+    await expect(tree.get_by_role('button', name='Monitor main session', exact=True)).to_contain_text('Model unreported')
+
+
 async def main():
     url = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:3001"
     requested = set(sys.argv[2].split(',')) if len(sys.argv) > 2 else None
@@ -507,7 +545,7 @@ async def main():
             launch["executable_path"] = os.environ["PLAYWRIGHT_CHROMIUM_EXECUTABLE"]
         browser = await playwright.chromium.launch(**launch)
         for width in [360, 390, 1280]:
-            for check in [tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, agent_status_filters, cost_history_graph, cost_history_retry, cost_burn_breakdown]:
+            for check in [tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, agent_status_filters, cost_history_graph, cost_history_retry, cost_burn_breakdown, agent_model_settings]:
                 if requested and check.__name__ not in requested:
                     continue
                 context = await browser.new_context(viewport=dict(width=width, height=844), is_mobile=width < 640, has_touch=width < 640)
