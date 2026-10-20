@@ -105,7 +105,7 @@ export class SessionWatcher implements AgentSessionWatcher {
 
   getCostHistory(sessionId: string) {
     const session = this.sessions.get(sessionId)
-    return session ? buildCostHistory(session.usageLedger?.costRecords() ?? []) : undefined
+    return session ? buildCostHistory(session.usageLedger?.costRecords() ?? [], 240, session.sessionCompleted ? undefined : Date.now()) : undefined
   }
 
   /** Re-emit session start + conversation events for a newly connected webview.

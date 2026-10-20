@@ -453,6 +453,50 @@ async def cost_history_retry(page):
     await expect(panel.get_by_role('img', name='API cost over time', exact=True)).to_have_count(0)
 
 
+async def cost_burn_breakdown(page):
+    start = 1792490400000
+    def parts(factor):
+        return dict(input=0.2*factor, output=0.3*factor, cacheRead=0.4*factor, cacheWrite=0.1*factor, unattributed=0)
+    points = [dict(timestamp=start+i*60000, costUSD=cost, breakdownUSD=parts(cost)) for i,cost in [(0,1),(1,3),(3,4)]]
+    rates = [dict(timestamp=start+i*60000, costUSDPerMinute=cost, breakdownUSDPerMinute=parts(cost)) for i,cost in enumerate([1,2,0,1])]
+    await page.route('**/session-cost-history?*', lambda route: route.fulfill(status=200, content_type='application/json', body=json.dumps(dict(
+        sessionId='phone-primary', history=dict(points=points, burnRate=dict(bucketMs=60000, endTimestamp=start+240000-1, points=rates),
+        untimedCostUSD=0, totalCostUSD=4, unpricedResponses=0)))))
+    await page.get_by_role('button', name='$Cost', exact=True).click()
+    panel = page.get_by_role('region', name='Session API costs')
+    rate = panel.get_by_role('img', name='API dollar burn rate', exact=True)
+    await expect(rate).to_be_visible()
+    await expect(panel).to_contain_text('1 min buckets')
+    slider = panel.get_by_role('slider', name='Inspect cost history', exact=True)
+    await slider.fill('1')
+    await expect(panel.get_by_label('Cost at selected time', exact=True)).to_contain_text('$3.00')
+    await expect(panel.get_by_label('Burn rate at selected time', exact=True)).to_contain_text('$2.00/min')
+    sources = panel.get_by_role('table', name='Cost and burn rate by source')
+    await expect(sources.get_by_role('row', name=re.compile('Input'))).to_contain_text('$0.60')
+    await expect(sources.get_by_role('row', name=re.compile('Input'))).to_contain_text('$0.40/min')
+    for name in ['Output', 'Cache read', 'Cache write']:
+        await expect(sources.get_by_role('row', name=re.compile(name))).to_be_visible()
+    overlay = panel.get_by_role('button', name='Cost breakdown', exact=True)
+    await expect(overlay).to_have_attribute('aria-pressed', 'true')
+    await overlay.click()
+    await expect(panel.locator('[aria-label="Cost source overlay"]')).to_have_count(0)
+    await expect(panel.locator('[aria-label="Burn rate source overlay"]')).to_have_count(0)
+    await overlay.click()
+    await expect(panel.locator('[aria-label="Cost source overlay"]')).to_have_count(1)
+    await expect(panel.locator('[aria-label="Burn rate source overlay"]')).to_have_count(1)
+    box = await rate.bounding_box()
+    await rate.click(position=dict(x=box['width']*0.66, y=box['height']*0.5))
+    await expect(panel.get_by_label('Burn rate at selected time', exact=True)).to_contain_text('$0.00/min')
+    assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    for control in [slider, overlay]:
+        box = await control.bounding_box()
+        assert box['height'] >= 44 and box['x'] >= 0 and box['x']+box['width'] <= page.viewport_size['width']
+    if page.viewport_size['width'] == 390:
+        await slider.fill('1')
+        await panel.evaluate('element => {element.scrollTop = 0}')
+        await page.screenshot(path='/tmp/branchline-burn-phone.png')
+
+
 async def main():
     url = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:3001"
     requested = set(sys.argv[2].split(',')) if len(sys.argv) > 2 else None
@@ -463,7 +507,7 @@ async def main():
             launch["executable_path"] = os.environ["PLAYWRIGHT_CHROMIUM_EXECUTABLE"]
         browser = await playwright.chromium.launch(**launch)
         for width in [360, 390, 1280]:
-            for check in [tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, agent_status_filters, cost_history_graph, cost_history_retry]:
+            for check in [tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, agent_status_filters, cost_history_graph, cost_history_retry, cost_burn_breakdown]:
                 if requested and check.__name__ not in requested:
                     continue
                 context = await browser.new_context(viewport=dict(width=width, height=844), is_mobile=width < 640, has_touch=width < 640)

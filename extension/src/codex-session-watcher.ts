@@ -154,6 +154,8 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
   private dirWatchers = new Map<string, fs.FSWatcher>()
   private sessions = new Map<string, WatchedCodexSession>()
   private sessionFiles = new Map<string, string>()
+  private historicalMetadata = new Map<string, SessionMetadata>()
+  private historyIndexed = false
   private workspacePath: string | null = null
   private scanInterval: NodeJS.Timeout | null = null
   /** One-shot flag so the cwd-mismatch hint is logged at most once per process. */
@@ -209,7 +211,7 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
     function* records(): IterableIterator<CostRecord> {
       for (const member of members) yield* member.rolloutState.usage.costRecords()
     }
-    return buildCostHistory(records())
+    return buildCostHistory(records(), 240, this.isSessionActive(sessionId) ? Date.now() : undefined)
   }
 
   start(): void {
@@ -277,6 +279,14 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
 
         this.attachSession(filePath, stat)
       }
+    }
+
+    if (this.sessions.size) {
+      if (!this.historyIndexed) {
+        this.indexSessionFiles()
+        this.historyIndexed = true
+      }
+      this.restoreHistoricalDescendants()
     }
 
     // Recent Codex activity exists but none of it belongs to this workspace —
@@ -368,6 +378,11 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
     const cached = this.sessionFiles.get(sessionId)
     if (cached) return cached
     // A busy child can belong to a main conversation started before SCAN_DAYS.
+    this.indexSessionFiles()
+    return this.sessionFiles.get(sessionId)
+  }
+
+  private indexSessionFiles(): void {
     const folders = [sessionsRoot()]
     while (folders.length > 0) {
       const folder = folders.pop()!
@@ -381,7 +396,36 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
         }
       }
     }
-    return this.sessionFiles.get(sessionId)
+  }
+
+  /** Restore billed history belonging to admitted roots, without adding old,
+   * unrelated conversations or treating a historical read as live activity. */
+  private restoreHistoricalDescendants(): void {
+    const restored: WatchedCodexSession[] = []
+    let progress = true
+    while (progress) {
+      progress = false
+      for (const [id, file] of this.sessionFiles) {
+        if (this.sessions.has(id)) continue
+        const metadata = this.historicalMetadata.get(id) ?? readSessionMetadata(file)
+        if (!metadata) continue
+        this.historicalMetadata.set(id, metadata)
+        if (!metadata.parentId || !this.sessions.has(metadata.parentId)) continue
+        if (this.workspacePath && (!metadata.cwd || !this.pathMatchesWorkspace(this.resolvePath(metadata.cwd) ?? metadata.cwd))) continue
+        let stat: fs.Stats
+        try { stat = fs.statSync(file) } catch { continue }
+        this.attachSession(file, stat, new Set(), true)
+        const session = this.sessions.get(id)
+        if (session) { restored.push(session); progress = true }
+      }
+    }
+    // All descendants must be known before emitting completion: the UI
+    // cascades completion to children, including any newly restored live ones.
+    for (const session of restored) {
+      if (!session.sessionCompleted || this.subtreeIsActive(session.sessionId)) continue
+      this.emitForSession(session.sessionId, { time: (session.lastActivityTime - session.sessionStartTime) / 1000,
+        type: 'agent_complete', payload: { name: ORCHESTRATOR_NAME, sessionEnd: true } })
+    }
   }
 
   private emitForSession(sessionId: string, event: AgentEvent): void {
@@ -402,16 +446,21 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
       time: event.time + (session.sessionStartTime - root.sessionStartTime) / 1000 })
   }
 
-  private attachSession(filePath: string, stat: fs.Stats, ancestors = new Set<string>()): void {
+  private attachSession(filePath: string, stat: fs.Stats, ancestors = new Set<string>(), restoring = false): void {
     const sessionId = this.sessionIdFor(filePath)
     if (this.sessions.has(sessionId) || ancestors.has(sessionId)) return
     const metadata = readSessionMetadata(filePath)
+    if (restoring && (!metadata?.parentId || !this.sessions.has(metadata.parentId))) return
+    const inactiveHistory = restoring && Date.now() - stat.mtimeMs > INACTIVITY_TIMEOUT_MS
     let parentId = metadata?.parentId ?? null
     const lineage = new Set(ancestors).add(sessionId)
     if (parentId) {
       const parentFile = this.findSessionFile(parentId)
       const parentCwd = parentFile ? readSessionMetadata(parentFile)?.cwd : null
-      if (!parentFile || lineage.has(parentId) || !parentCwd || !this.pathMatchesWorkspace(this.resolvePath(parentCwd) ?? parentCwd)) parentId = null
+      if (!parentFile || lineage.has(parentId) || !parentCwd || !this.pathMatchesWorkspace(this.resolvePath(parentCwd) ?? parentCwd)) {
+        if (restoring) return
+        parentId = null
+      }
       else this.attachSession(parentFile, fs.statSync(parentFile), lineage)
     }
     const existingRoot = parentId ? this.rootSession(parentId) : undefined
@@ -445,7 +494,7 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
       sessionStartTime: stat.birthtimeMs || stat.mtimeMs,
       lastActivityTime: stat.mtimeMs,
       sessionDetected: false,
-      sessionCompleted: false,
+      sessionCompleted: inactiveHistory,
       label,
       rolloutState: createCodexRolloutState(),
       parser,
@@ -453,16 +502,16 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
       displayName: metadata?.displayName ?? 'Subagent',
     }
     this.sessions.set(sessionId, session)
-    this.reviveInactiveAncestors(session)
+    if (!restoring) this.reviveInactiveAncestors(session)
 
     // Drain existing content first, so late-opening panels see full history.
-    this.readNewLines(sessionId)
+    this.readNewLines(sessionId, restoring)
 
     session.sessionDetected = true
     if (!parentId) {
       this._onSessionDetected.fire(sessionId)
       this._onSessionLifecycle.fire({ type: 'started', sessionId, label: session.label })
-    } else if (existingRoot && !groupWasActive) {
+    } else if (existingRoot && !groupWasActive && !inactiveHistory) {
       this._onSessionLifecycle.fire({ type: 'started', sessionId: existingRoot.sessionId, label: existingRoot.label })
     }
 
@@ -473,11 +522,11 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
     // fs.watch on macOS sometimes silently stops after long idle — poll as backup.
     session.pollTimer = setInterval(() => this.readNewLines(sessionId), POLL_FALLBACK_MS)
 
-    this.resetInactivityTimer(sessionId)
+    if (!session.sessionCompleted) this.resetInactivityTimer(sessionId)
     log.info(`Attached to session ${sessionId.slice(0, SESSION_ID_DISPLAY)} at ${filePath}`)
   }
 
-  private readNewLines(sessionId: string): void {
+  private readNewLines(sessionId: string, restoring = false): void {
     const session = this.sessions.get(sessionId)
     if (!session) return
 
@@ -485,11 +534,11 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
     if (!result) return
     session.fileSize = result.newSize
     session.fileTail = result.tail
-    session.lastActivityTime = Date.now()
+    if (!restoring) session.lastActivityTime = Date.now()
 
     // Re-activate if the session had been marked complete on inactivity —
     // new content means the user resumed the Codex CLI.
-    if (session.sessionCompleted) {
+    if (session.sessionCompleted && !restoring) {
       const root = this.rootSession(sessionId)!
       const groupWasActive = this.groupIsActive(root.sessionId)
       session.sessionCompleted = false
@@ -504,7 +553,7 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
       catch (err) { log.debug('Parser threw on line:', err) }
     }
 
-    this.resetInactivityTimer(sessionId)
+    if (!restoring) this.resetInactivityTimer(sessionId)
   }
 
   private resetInactivityTimer(sessionId: string): void {
@@ -542,6 +591,9 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
       if (s.inactivityTimer) clearTimeout(s.inactivityTimer)
     }
     this.sessions.clear()
+    this.sessionFiles.clear()
+    this.historicalMetadata.clear()
+    this.historyIndexed = false
     this._onEvent.dispose()
     this._onSessionDetected.dispose()
     this._onSessionLifecycle.dispose()

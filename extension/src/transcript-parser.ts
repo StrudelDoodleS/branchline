@@ -27,7 +27,7 @@ import { summarizeInput, summarizeResult, extractInputData, detectError, buildDi
 import { estimateTokensFromContent, estimateTokensFromText } from './token-estimator'
 import { createLogger } from './logger'
 import { recordClaudeContext } from './claude-context'
-import { normalizeClaudeUsage, UsageLedger } from './token-usage'
+import { normalizeClaudeUsage, claudeUsageCalls, UsageLedger } from './token-usage'
 
 const log = createLogger('TranscriptParser')
 
@@ -289,7 +289,7 @@ export class TranscriptParser {
     const id = msg.id || entry.uuid
     if (!tokens || !id) return
     session.usageLedger ??= new UsageLedger()
-    const owner = session.usageLedger.record(id, agentName, msg.model ?? '', tokens, undefined, Date.parse(entry.timestamp ?? ''))
+    const owner = session.usageLedger.record(id, agentName, msg.model ?? '', tokens, undefined, Date.parse(entry.timestamp ?? ''), claudeUsageCalls(msg.usage))
     if (owner && owner !== agentName) this.delegate.emitContextUpdate(owner, session, session.sessionId)
   }
 

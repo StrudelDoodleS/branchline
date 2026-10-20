@@ -112,3 +112,33 @@ test(`Claude lifecycle restores and finishes correctly via ${finishSource}`, asy
   }
 })
 }
+
+test('completed Claude cost histories do not acquire a growing idle tail', context => {
+  const now = Date.now()
+  context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now })
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'branchline-claude-cost-end-'))
+  const bundle = path.join(directory, 'watcher.cjs')
+  buildSync({ entryPoints: [path.resolve('extension/src/session-watcher.ts')], outfile: bundle,
+    bundle: true, platform: 'node', format: 'cjs', alias: { vscode: path.resolve('scripts/vscode-shim.js') } })
+  const { SessionWatcher: Watcher } = createRequire(import.meta.url)(bundle)
+  const watcher: SessionWatcher = new Watcher()
+  const id = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa'
+  const file = path.join(directory, id + '.jsonl')
+  const ended = now - 86400000
+  fs.writeFileSync(file, JSON.stringify({ type: 'assistant', timestamp: new Date(ended).toISOString(),
+    message: { id: 'priced', role: 'assistant', model: 'claude-opus-5-5', stop_reason: 'end_turn',
+      usage: { input_tokens: 1000, output_tokens: 100 }, content: [{ type: 'text', text: 'Finished' }] } }) + '\n')
+  try {
+    ;(watcher as unknown as { watchSession(id: string, file: string): void }).watchSession(id, file)
+    assert.equal(watcher.getCostHistory(id)!.burnRate.endTimestamp, now)
+    context.mock.timers.tick(5 * 60000 + 1)
+    assert.equal(watcher.getActiveSessions()[0].status, 'completed')
+    const finished = watcher.getCostHistory(id)!
+    assert.equal(finished.burnRate.endTimestamp, ended)
+    context.mock.timers.tick(86400000)
+    assert.deepEqual(watcher.getCostHistory(id), finished)
+  } finally {
+    watcher.dispose()
+    fs.rmSync(directory, { recursive: true, force: true })
+  }
+})

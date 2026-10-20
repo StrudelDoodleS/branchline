@@ -274,6 +274,35 @@ describe('Claude cumulative API usage', () => {
     } finally { fs.rmSync(directory, { recursive: true, force: true }) }
   })
 
+  it('includes compaction iterations once and applies prompt tiers to each sampling call', () => {
+    const { session, feed } = setup()
+    const message = response('compacted', 100)
+    const usage = { input_tokens: 60000, output_tokens: 100,
+      iterations: [{ type: 'compaction', input_tokens: 60000, output_tokens: 200 },
+        { type: 'message', input_tokens: 60000, output_tokens: 100 }] }
+    feed({ ...message, message: { ...message.message, model: 'claude-haiku-5-5', usage } })
+    feed({ ...message, message: { ...message.message, model: 'claude-haiku-5-5', usage } })
+    const result = session.usageLedger!.snapshot('orchestrator')!
+    assert.equal(result.inputTokens, 120000)
+    assert.equal(result.outputTokens, 300)
+    assert.ok(Math.abs(result.costUSD! - 0.01215) < 1e-10)
+  })
+
+  for (const type of ['advisor_message', 'fallback_message']) {
+    it(`uses the individual model for a Claude ${type} iteration`, () => {
+      const { session, feed } = setup()
+      const message = response('mixed-models', 100, 'claude-sonnet-5-5')
+      const usage = { input_tokens: 2000, output_tokens: 200,
+        iterations: [{ type: 'message', input_tokens: 1000, output_tokens: 100 },
+          { type, model: 'claude-opus-5-5', input_tokens: 1000, output_tokens: 100 }] }
+      feed({ ...message, message: { ...message.message, usage } })
+      assert.ok(Math.abs(session.usageLedger!.snapshot('orchestrator')!.costUSD! - 0.009) < 1e-10)
+      const unknown = { ...usage, iterations: [usage.iterations[0], { ...usage.iterations[1], model: 'unknown-model' }] }
+      feed({ ...message, message: { ...message.message, usage: unknown } })
+      assert.equal(session.usageLedger!.snapshot('orchestrator')!.costUSD, null)
+    })
+  }
+
   it('counts each response once, updates streamed output, and preserves totals across context changes', () => {
     const { session, feed } = setup()
     feed(response('first', 50))

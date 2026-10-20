@@ -49,7 +49,8 @@ describe('Codex cumulative API usage', () => {
         ? { type: 'token_usage_record', payload: { response_id: 'dated', usage, thread_token_usage: usage } }
         : { type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: usage, last_token_usage: usage } } }
       parser.processLine(JSON.stringify({ ...record, timestamp: '2026-10-18T10:00:00Z' }), state)
-      assert.deepEqual([...state.usage.costRecords()], [{ timestamp: Date.parse('2026-10-18T10:00:00Z'), costUSD: 0.0148 }])
+      assert.deepEqual([...state.usage.costRecords()], [{ timestamp: Date.parse('2026-10-18T10:00:00Z'), costUSD: 0.0148,
+        breakdownUSD: { input: 0.004, output: 0.01, cacheRead: 0.0008, cacheWrite: 0, unattributed: 0 } }])
     }
   })
   function run(records: unknown[]) {

@@ -523,7 +523,7 @@ export async function createRelay(options: RelayOptions): Promise<Relay> {
     handleCostHistory(req: http.IncomingMessage, res: http.ServerResponse) {
       const sessionId = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams.get('sessionId')
       const session = sessionId ? sessions.get(sessionId) : undefined
-      const history = session ? buildCostHistory(session.usageLedger?.costRecords() ?? [])
+      const history = session ? buildCostHistory(session.usageLedger?.costRecords() ?? [], 240, session.sessionCompleted ? undefined : Date.now())
         : sessionId ? codexWatcher?.getCostHistory(sessionId) : undefined
       res.writeHead(history ? 200 : 404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
       res.end(JSON.stringify(history ? { sessionId, history } : { error: 'Cost history is unavailable' }))

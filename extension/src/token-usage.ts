@@ -14,17 +14,28 @@ export interface UsageTotals extends TokenCounts {
   costUSD: number | null
 }
 
-export interface CostRecord { timestamp?: number; costUSD: number | null }
+export interface CostBreakdown { input: number; output: number; cacheRead: number; cacheWrite: number; unattributed: number }
+export interface CostRecord { timestamp?: number; costUSD: number | null; breakdownUSD?: CostBreakdown }
+export interface CostHistoryPoint { timestamp: number; costUSD: number; breakdownUSD: CostBreakdown }
+export interface BurnRatePoint { timestamp: number; costUSDPerMinute: number; breakdownUSDPerMinute: CostBreakdown }
 export interface CostHistory {
-  points: Array<{ timestamp: number; costUSD: number }>
+  points: CostHistoryPoint[]
+  burnRate: { bucketMs: number; endTimestamp?: number; points: BurnRatePoint[] }
   untimedCostUSD: number
   totalCostUSD: number | null
   unpricedResponses: number
 }
 
+const PARTS = ['input', 'output', 'cacheRead', 'cacheWrite', 'unattributed'] as const
+const emptyBreakdown = (): CostBreakdown => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, unattributed: 0 })
+function addBreakdown(target: CostBreakdown, source: CostBreakdown, factor = 1): void {
+  for (const key of PARTS) target[key] += source[key] * factor
+}
+const sumBreakdown = (parts: CostBreakdown) => parts.input + parts.cacheRead + parts.cacheWrite + parts.output + parts.unattributed
+
 /** Cumulative dated cost, bounded for display without losing the final total. */
-export function buildCostHistory(records: Iterable<CostRecord>, maxPoints = 240): CostHistory {
-  const dated = new Map<number, number>()
+export function buildCostHistory(records: Iterable<CostRecord>, maxPoints = 240, now?: number): CostHistory {
+  const dated = new Map<number, { costUSD: number; breakdownUSD: CostBreakdown }>()
   let untimedCostUSD = 0, unpricedResponses = 0, total = 0
   for (const record of records) {
     if (record.costUSD === null || !Number.isFinite(record.costUSD) || record.costUSD < 0) {
@@ -35,14 +46,42 @@ export function buildCostHistory(records: Iterable<CostRecord>, maxPoints = 240)
     if (record.timestamp === undefined || !Number.isFinite(record.timestamp) || record.timestamp < 0) {
       untimedCostUSD += record.costUSD
     } else {
-      dated.set(record.timestamp, (dated.get(record.timestamp) ?? 0) + record.costUSD)
+      const entry = dated.get(record.timestamp) ?? { costUSD: 0, breakdownUSD: emptyBreakdown() }
+      entry.costUSD += record.costUSD
+      addBreakdown(entry.breakdownUSD, record.breakdownUSD ?? { ...emptyBreakdown(), unattributed: record.costUSD })
+      dated.set(record.timestamp, entry)
     }
   }
   let cumulative = 0
-  const all = [...dated].sort(([a], [b]) => a - b).map(([timestamp, cost]) => ({ timestamp, costUSD: cumulative += cost }))
-  const limit = Math.max(2, Math.floor(maxPoints))
+  const cumulativeParts = emptyBreakdown()
+  const ordered = [...dated].sort(([a], [b]) => a - b)
+  const all = ordered.map(([timestamp, entry]) => {
+    addBreakdown(cumulativeParts, entry.breakdownUSD)
+    return { timestamp, costUSD: cumulative += entry.costUSD, breakdownUSD: { ...cumulativeParts } }
+  })
+  const limit = Math.max(2, Number.isFinite(maxPoints) ? Math.floor(maxPoints) : 240)
   const points = all.length <= limit ? all : Array.from({ length: limit }, (_, i) => all[Math.round(i * (all.length - 1) / (limit - 1))])
-  return { points, untimedCostUSD, totalCostUSD: unpricedResponses ? null : total, unpricedResponses }
+  const burnRate: CostHistory['burnRate'] = { bucketMs: 60000, points: [] }
+  if (ordered.length) {
+    const first = ordered[0][0], last = ordered.at(-1)![0]
+    const end = now !== undefined && Number.isFinite(now) ? Math.max(last, now) : last
+    burnRate.endTimestamp = end
+    const minimumMinutes = Math.max(1, (end - first) / (limit - 1) / 60000)
+    const magnitude = 10 ** Math.floor(Math.log10(minimumMinutes))
+    burnRate.bucketMs = [1, 2, 5, 10].map(n => n * magnitude).find(n => n >= minimumMinutes)! * 60000
+    const start = Math.floor(first / burnRate.bucketMs) * burnRate.bucketMs
+    const count = Math.floor((end - start) / burnRate.bucketMs) + 1
+    burnRate.points = Array.from({ length: count }, (_, i) => ({ timestamp: start + i * burnRate.bucketMs,
+      costUSDPerMinute: 0, breakdownUSDPerMinute: emptyBreakdown() }))
+    // Integrate raw charges into fixed time buckets before display sampling.
+    // Empty buckets are retained so idle gaps cannot look like ongoing spend.
+    for (const [timestamp, entry] of ordered) {
+      const bucket = burnRate.points[Math.floor((timestamp - start) / burnRate.bucketMs)]
+      bucket.costUSDPerMinute += entry.costUSD * 60000 / burnRate.bucketMs
+      addBreakdown(bucket.breakdownUSDPerMinute, entry.breakdownUSD, 60000 / burnRate.bucketMs)
+    }
+  }
+  return { points, burnRate, untimedCostUSD, totalCostUSD: unpricedResponses ? null : total, unpricedResponses }
 }
 
 type Rates = { input: number; output: number; read: number; write: number; write1h?: number; longAfter?: number; longInput?: number; longOutput?: number }
@@ -93,7 +132,7 @@ function count(value: unknown): number {
 function valid(tokens: TokenCounts): boolean { return KEYS.every(key => Number.isFinite(tokens[key]) && tokens[key] >= 0) }
 function total(tokens: TokenCounts): number { return tokens.inputTokens + tokens.outputTokens + tokens.cacheReadTokens + tokens.cacheWriteTokens }
 
-export function normalizeClaudeUsage(raw: unknown): TokenCounts | undefined {
+function normalizeClaudeCallUsage(raw: unknown): TokenCounts | undefined {
   const u = object(raw)
   if (u.input_tokens === undefined) return
   const tokens: TokenCounts = {
@@ -105,6 +144,28 @@ export function normalizeClaudeUsage(raw: unknown): TokenCounts | undefined {
   if (valid(tokens) && tokens.cacheWrite1hTokens <= tokens.cacheWriteTokens && tokens.reasoningTokens <= tokens.outputTokens && total(tokens) > 0) return tokens
 }
 
+/** Threshold compaction adds sampling calls omitted from top-level usage. */
+export function claudeUsageCalls(raw: unknown): Array<TokenCounts & { model?: string }> | undefined {
+  const iterations = object(raw).iterations
+  const calls: Array<TokenCounts & { model?: string }> = []
+  for (const rawCall of Array.isArray(iterations) && iterations.length ? iterations : [raw]) {
+    const tokens = normalizeClaudeCallUsage(rawCall)
+    if (!tokens) return
+    const model = object(rawCall).model
+    calls.push({ ...tokens, ...(typeof model === 'string' && model ? { model } : {}) })
+  }
+  return calls
+}
+
+export function normalizeClaudeUsage(raw: unknown): TokenCounts | undefined {
+  const calls = claudeUsageCalls(raw)
+  if (!calls) return
+  const result = emptyCounts()
+  for (const call of calls) for (const key of KEYS) result[key] += call[key]
+  result.reasoningTokens = Math.max(result.reasoningTokens, count(object(object(raw).output_tokens_details).thinking_tokens))
+  if (valid(result) && result.reasoningTokens <= result.outputTokens) return result
+}
+
 function normalizeCodexUsage(raw: unknown): TokenCounts | undefined {
   const u = object(raw)
   if (u.input_tokens === undefined || u.output_tokens === undefined) return
@@ -114,7 +175,7 @@ function normalizeCodexUsage(raw: unknown): TokenCounts | undefined {
   if (valid(tokens) && tokens.reasoningTokens <= tokens.outputTokens) return tokens
 }
 
-export function apiCost(model: string, tokens: TokenCounts, requestInput = tokens.inputTokens + tokens.cacheReadTokens + tokens.cacheWriteTokens): number | null {
+export function apiCostBreakdown(model: string, tokens: TokenCounts, requestInput = tokens.inputTokens + tokens.cacheReadTokens + tokens.cacheWriteTokens): CostBreakdown | null {
   const id = model.toLowerCase().replace(/\[[^\]]*\]/g, '').replace(/-\d{8}$/, '')
   const rates = PRICES[id]
   if (!rates || !valid(tokens)) return null
@@ -122,40 +183,56 @@ export function apiCost(model: string, tokens: TokenCounts, requestInput = token
   const inputMultiplier = long ? rates.longInput ?? 2 : 1
   const outputMultiplier = long ? rates.longOutput ?? 1.5 : 1
   const write5m = tokens.cacheWriteTokens - tokens.cacheWrite1hTokens
-  const cost = ((tokens.inputTokens * rates.input + tokens.cacheReadTokens * rates.read
-    + (write5m > 0 ? write5m * rates.write : 0)
-    + (tokens.cacheWrite1hTokens > 0 ? tokens.cacheWrite1hTokens * (rates.write1h ?? NaN) : 0)) * inputMultiplier
-    + tokens.outputTokens * rates.output * outputMultiplier) / 1_000_000
-  return Number.isFinite(cost) ? cost : null
+  const parts: CostBreakdown = {
+    input: tokens.inputTokens * rates.input * inputMultiplier / 1_000_000,
+    output: tokens.outputTokens * rates.output * outputMultiplier / 1_000_000,
+    cacheRead: tokens.cacheReadTokens * rates.read * inputMultiplier / 1_000_000,
+    cacheWrite: ((write5m > 0 ? write5m * rates.write : 0)
+      + (tokens.cacheWrite1hTokens > 0 ? tokens.cacheWrite1hTokens * (rates.write1h ?? NaN) : 0)) * inputMultiplier / 1_000_000,
+    unattributed: 0,
+  }
+  return PARTS.every(key => Number.isFinite(parts[key])) ? parts : null
+}
+
+export function apiCost(model: string, tokens: TokenCounts, requestInput?: number): number | null {
+  const parts = apiCostBreakdown(model, tokens, requestInput)
+  return parts ? sumBreakdown(parts) : null
 }
 
 /** Replace response snapshots rather than adding every streamed content block.
  * Response IDs are session-wide, so inline progress and subagent files dedup. */
 export class UsageLedger {
-  private responses = new Map<string, { agent: string; model: string; tokens: TokenCounts; cost: number | null; timestamp?: number }>()
+  private responses = new Map<string, { agent: string; model: string; tokens: TokenCounts; cost: number | null; breakdown: CostBreakdown | null; timestamp?: number }>()
   private agents = new Map<string, { tokens: TokenCounts; cost: number; unpriced: number }>()
 
-  record(id: string, agent: string, model: string, tokens: TokenCounts, requestInput?: number, timestamp?: number): string | undefined {
+  record(id: string, agent: string, model: string, tokens: TokenCounts, requestInput?: number, timestamp?: number, calls?: ReadonlyArray<TokenCounts & { model?: string }>): string | undefined {
     const old = this.responses.get(id)
     const at = timestamp !== undefined && Number.isFinite(timestamp) && timestamp >= 0 ? timestamp : undefined
     model ||= old?.model ?? ''
-    if (old && (tokens.outputTokens < old.tokens.outputTokens || (model === old.model && KEYS.every(key => tokens[key] === old.tokens[key])))) {
+    let breakdown: CostBreakdown | null = emptyBreakdown()
+    for (const call of calls ?? [tokens]) {
+      const parts = apiCostBreakdown('model' in call && typeof call.model === 'string' ? call.model : model, call, calls ? undefined : requestInput)
+      if (!parts) { breakdown = null; break }
+      addBreakdown(breakdown, parts)
+    }
+    if (old && (tokens.outputTokens < old.tokens.outputTokens || (model === old.model && KEYS.every(key => tokens[key] === old.tokens[key])
+      && PARTS.every(key => old.breakdown?.[key] === breakdown?.[key])))) {
       if (old.timestamp === undefined && at !== undefined) { old.timestamp = at; return old.agent }
       return
     }
     const owner = old?.agent ?? agent
     const entry = this.agents.get(owner) ?? { tokens: emptyCounts(), cost: 0, unpriced: 0 }
-    const cost = apiCost(model, tokens, requestInput)
+    const cost = breakdown ? sumBreakdown(breakdown) : null
     for (const key of KEYS) entry.tokens[key] += tokens[key] - (old?.tokens[key] ?? 0)
     entry.cost += (cost ?? 0) - (old?.cost ?? 0)
     entry.unpriced += Number(cost === null) - Number(old?.cost === null)
     this.agents.set(owner, entry)
-    this.responses.set(id, { agent: owner, model, tokens: { ...tokens }, cost, timestamp: old?.timestamp ?? at })
+    this.responses.set(id, { agent: owner, model, tokens: { ...tokens }, cost, breakdown, timestamp: old?.timestamp ?? at })
     return owner
   }
 
   *costRecords(): IterableIterator<CostRecord> {
-    for (const response of this.responses.values()) yield { timestamp: response.timestamp, costUSD: response.cost }
+    for (const response of this.responses.values()) yield { timestamp: response.timestamp, costUSD: response.cost, breakdownUSD: response.breakdown ?? undefined }
   }
 
   snapshot(agent: string): UsageTotals | undefined {
