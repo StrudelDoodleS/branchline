@@ -35,6 +35,7 @@ export function handleAgentSpawn(
       ...(model ? { model, tokensMax: ctx.getContextWindowSize(model) } : {}),
       ...(runtime ? { runtime } : {}),
     })
+    if (!ctx.skipForceSync) setTimeout(() => ctx.syncForceSimulation(state.agents, state.edges), 0)
     return
   }
 
@@ -149,6 +150,7 @@ export function handleAgentComplete(
         state.toolCalls.set(tcId, { ...tc, state: 'complete', completeTime: currentTime })
       }
     }
+    if (!ctx.skipForceSync) setTimeout(() => ctx.syncForceSimulation(state.agents, state.edges), 0)
   }
 }
 

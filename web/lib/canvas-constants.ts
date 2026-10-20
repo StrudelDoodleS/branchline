@@ -1,15 +1,14 @@
+// Branchline fork modifications; see FORK.md.
 // ─── Model families ──────────────────────────────────────────────────────────
 
-/** Single source of truth for Claude model families. Display names
- *  (formatModelName in utils.ts), context-window sizes, and cost rates all
- *  derive from this table — add new families here and nowhere else.
- *  Rates are blended $/M-token (0.75 × input + 0.25 × output per-MTok). */
-export const CLAUDE_FAMILIES: ReadonlyArray<{ name: string; context: number; rate: number }> = [
-  { name: 'fable',  context: 1_000_000, rate: 20 }, // $10 in / $50 out
-  { name: 'mythos', context: 1_000_000, rate: 20 }, // $10 in / $50 out
-  { name: 'opus',   context: 1_000_000, rate: 10 }, // $5 in / $25 out
-  { name: 'sonnet', context: 1_000_000, rate: 6 },  // $3 in / $15 out
-  { name: 'haiku',  context: 200_000,   rate: 2 },  // $1 in / $5 out
+/** Display names and fallback context windows. Billing uses the exact model's
+ *  API rates in extension/src/token-usage.ts, never these context sizes. */
+export const CLAUDE_FAMILIES: ReadonlyArray<{ name: string; context: number }> = [
+  { name: 'fable', context: 1_000_000 },
+  { name: 'mythos', context: 1_000_000 },
+  { name: 'opus', context: 1_000_000 },
+  { name: 'sonnet', context: 1_000_000 },
+  { name: 'haiku', context: 200_000 },
 ]
 
 /** Regex alternation fragment of all Claude family names (e.g. 'fable|mythos|…'). */
@@ -178,18 +177,6 @@ export function getDiscoveryCardDimensions(label: string, contentLines: string[]
 // ─── Tool card dimension constant ───────────────────────────────────────────
 
 export const TOOL_MAX_CARD_W = 160
-
-/** Blended $/M-token rate by model family (0.75 × input + 0.25 × output
- *  per-MTok pricing, the same weighting the original Sonnet-class rate used).
- *  Claude rates derive from CLAUDE_FAMILIES. Patterns are checked in order;
- *  first match wins. Matched against lower-cased model IDs. */
-export const MODEL_FAMILY_COST: ReadonlyArray<{ pattern: RegExp; rate: number }> = [
-  ...CLAUDE_FAMILIES.map(f => ({ pattern: new RegExp(`${f.name}-\\d`), rate: f.rate })),
-  { pattern: /gpt-\d/, rate: 5 }, // gpt-5.3-codex: $1.75 in / $14 out
-]
-
-/** Blended $/M-token fallback rate for unknown models (Sonnet-class) */
-export const COST_RATE = 6
 
 // ─── Agent drawing constants ────────────────────────────────────────────────
 

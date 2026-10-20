@@ -319,6 +319,34 @@ async def header_contrast(page):
         assert ratio >= 4.5, f"{name} text contrast is {ratio:.2f}:1; expected at least 4.5:1"
 
 
+async def reported_usage_costs(page):
+    header = page.get_by_role('region', name='Agent controls')
+    await expect(header).to_be_visible()
+    usage = dict(inputTokens=2000, outputTokens=1000, cacheReadTokens=8000, cacheWriteTokens=500,
+                 cacheWrite1hTokens=200, reasoningTokens=400, totalTokens=11500, costUSD=1.25)
+    events = [dict(time=2, type='context_update', payload=dict(agent=agent, tokens=100, usage=usage),
+                   sessionId='phone-primary', eventId=1000+i, streamId='phone-fixture')
+              for i,agent in enumerate(['Orchestrator', 'Reviewer'])]
+    await page.evaluate("events => window.postMessage({type:'agent-event-batch',events},'*')", events)
+    await expect(header).to_contain_text('~$2.50 API')
+    # Duplicate replay replaces the totals; context fill is unrelated to billing.
+    await page.evaluate("events => window.postMessage({type:'agent-event-batch',events},'*')", events)
+    await expect(header).to_contain_text('23k tokens used')
+    await page.get_by_role('button', name='$Cost', exact=True).click()
+    panel = page.get_by_role('region', name='Session API costs')
+    await expect(panel).to_be_visible()
+    for text in ['4,000', '2,000', '16,000', '600', '400']:
+        await expect(panel.get_by_text(text, exact=True)).to_be_visible()
+    box = await panel.bounding_box()
+    assert box['x'] >= 0 and box['x'] + box['width'] <= page.viewport_size['width']
+    assert box['y'] >= (await header.bounding_box())['y'] + (await header.bounding_box())['height']
+    assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    if page.viewport_size['width'] == 390:
+        await page.screenshot(path='/tmp/branchline-api-costs-phone.png')
+    await page.get_by_role('button', name='Close API costs', exact=True).click()
+    await expect(panel).to_have_count(0)
+
+
 async def main():
     url = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:3001"
     requested = set(sys.argv[2].split(',')) if len(sys.argv) > 2 else None
@@ -329,7 +357,7 @@ async def main():
             launch["executable_path"] = os.environ["PLAYWRIGHT_CHROMIUM_EXECUTABLE"]
         browser = await playwright.chromium.launch(**launch)
         for width in [360, 390, 1280]:
-            for check in [tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait]:
+            for check in [tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs]:
                 if requested and check.__name__ not in requested:
                     continue
                 context = await browser.new_context(viewport=dict(width=width, height=844), is_mobile=width < 640, has_touch=width < 640)

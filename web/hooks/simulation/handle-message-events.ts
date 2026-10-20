@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 import type { ContextBreakdown } from '@/lib/agent-types'
 import type { ConversationMessage } from './types'
 import { appendConversation, asString, asNumber, LABEL_LEN_NAME, LABEL_LEN_TASK, LABEL_LEN_BUBBLE, MAX_BUBBLES } from './types'
@@ -75,6 +76,7 @@ export function handleContextUpdate(
     state.agents.set(agentName, {
       ...agent,
       tokensUsed: tokens,
+      ...(payload.usage && typeof payload.usage === 'object' ? { usage: payload.usage as NonNullable<typeof agent.usage> } : {}),
       tokensMax: tokensMaxOverride ?? agent.tokensMax,
       contextBreakdown: breakdown || agent.contextBreakdown,
       state: agent.state === 'complete' ? 'complete' : 'thinking'

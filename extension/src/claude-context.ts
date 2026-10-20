@@ -34,7 +34,7 @@ export function claudeContextPayload(session: WatchedSession, agent: string) {
   // the reported current window rather than drawing the whole conversation.
   const scale = estimated > 0 ? tokens / estimated : 0
   const bd = session.contextBreakdown
-  return { agent, tokens, breakdown: {
+  return { agent, tokens, ...(session.usageLedger?.snapshot(agent) ? { usage: session.usageLedger.snapshot(agent) } : {}), breakdown: {
     systemPrompt: bd.systemPrompt * scale,
     userMessages: bd.userMessages * scale,
     toolResults: bd.toolResults * scale,

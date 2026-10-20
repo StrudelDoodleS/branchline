@@ -1,12 +1,13 @@
+// Branchline fork modifications; see FORK.md.
 import type { SimulationState } from './types'
-import { TOOL_MIN_DISPLAY_S, TOOL_MAX_RUNNING_S, DISCOVERY_HOLD_S, BUBBLE_VISIBLE_S, MIN_VISIBLE_OPACITY } from '@/lib/canvas-constants'
+import { TOOL_MIN_DISPLAY_S, TOOL_MAX_RUNNING_S, DISCOVERY_HOLD_S, BUBBLE_VISIBLE_S, MIN_VISIBLE_OPACITY } from '../../lib/canvas-constants'
 
 /** Snap visual properties to their analytically correct values at a given time (used during seek) */
 export function snapVisualState(state: SimulationState, targetTime: number): SimulationState {
 
   const newAgents = new Map(state.agents)
   for (const [id, agent] of newAgents) {
-    if (agent.state === 'complete' && !agent.isMain) {
+    if (agent.state === 'complete' && !agent.isMain && !agent.usage) {
       // Remove completed sub-agents entirely during seek
       newAgents.delete(id)
       continue
@@ -18,7 +19,7 @@ export function snapVisualState(state: SimulationState, targetTime: number): Sim
       snapped.timeAlive = targetTime - agent.spawnTime
     } else {
       // Main agent that completed
-      snapped.opacity = 0.5
+      snapped.opacity = agent.isMain ? 0.5 : 0
       snapped.scale = 1
     }
     snapped.messageBubbles = agent.messageBubbles.filter(b => targetTime - b.time <= BUBBLE_VISIBLE_S)

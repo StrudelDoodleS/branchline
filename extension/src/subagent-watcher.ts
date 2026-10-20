@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 /**
  * Subagent file watching logic extracted from SessionWatcher.
  *
@@ -11,12 +12,13 @@
 
 import * as fs from 'fs'
 import * as path from 'path'
-import { AgentEvent, SubagentState, WatchedSession, emitSubagentSpawn } from './protocol'
-import { SESSION_ID_DISPLAY, ORCHESTRATOR_NAME, generateSubagentFallbackName, resolveSubagentChildName } from './constants'
+import { AgentEvent, SubagentState, WatchedSession, TranscriptEntry, emitSubagentSpawn } from './protocol'
+import { SESSION_ID_DISPLAY, ORCHESTRATOR_NAME, INACTIVITY_TIMEOUT_MS, generateSubagentFallbackName, resolveSubagentChildName } from './constants'
 import { readNewFileLines } from './fs-utils'
 import { TranscriptParser } from './transcript-parser'
 import { handlePermissionDetection, PermissionDetectionDelegate } from './permission-detection'
 import { createLogger } from './logger'
+import { claudeContextPayload } from './claude-context'
 
 const log = createLogger('SubagentWatcher')
 
@@ -100,6 +102,7 @@ function startWatchingSubagentFile(
   // Pre-scan existing content for dedup IDs and determine if the subagent
   // is still active (has unmatched tool_use blocks = pending work).
   const pendingToolUseIds = new Set<string>()
+  let lastModel: string | undefined
   try {
     const stat = fs.statSync(filePath)
     if (stat.size > 0) {
@@ -108,6 +111,11 @@ function startWatchingSubagentFile(
         if (!line.trim()) continue
         try {
           const raw: unknown = JSON.parse(line.trim())
+          if (raw && typeof raw === 'object') {
+            const transcript = raw as TranscriptEntry
+            parser.recordAssistantUsage(transcript, agentName, session)
+            if (transcript.type === 'assistant' && transcript.message?.model && !transcript.message.model.startsWith('<')) lastModel = transcript.message.model
+          }
           const entry = raw as { message?: { content?: Array<{ type: string; id?: string; tool_use_id?: string }> } }
           if (raw && typeof raw === 'object' && entry.message && Array.isArray(entry.message.content)) {
             for (const block of entry.message.content) {
@@ -128,10 +136,24 @@ function startWatchingSubagentFile(
   // Only emit spawn for subagents that are still active (have pending work)
   // AND haven't already been spawned by the transcript parser.
   const alreadySpawned = session.spawnedSubagents.has(agentName)
-  state.spawnEmitted = pendingToolUseIds.size > 0 || alreadySpawned
-  if (pendingToolUseIds.size > 0 && !alreadySpawned) {
+  const hasUsage = !!session.usageLedger?.snapshot(agentName)
+  state.spawnEmitted = pendingToolUseIds.size > 0 || alreadySpawned || hasUsage
+  if ((pendingToolUseIds.size > 0 || hasUsage) && !alreadySpawned) {
     session.spawnedSubagents.add(agentName)
     emitSubagentSpawn(delegate, ORCHESTRATOR_NAME, agentName, agentName, sessionId)
+  }
+  if (hasUsage) {
+    // The main attach scan reserves child names without emitting identities.
+    // Restore identity before usage even when that name was already reserved.
+    if (alreadySpawned) delegate.emit({ time: delegate.elapsed(sessionId), type: 'agent_spawn',
+      payload: { name: agentName, parent: ORCHESTRATOR_NAME, task: agentName } }, sessionId)
+    if (lastModel) delegate.emit({ time: delegate.elapsed(sessionId), type: 'model_detected', payload: { agent: agentName, model: lastModel } }, sessionId)
+    delegate.emit({ time: delegate.elapsed(sessionId), type: 'context_update', payload: claudeContextPayload(session, agentName) }, sessionId)
+    const historical = Date.now() - fs.statSync(filePath).mtimeMs > INACTIVITY_TIMEOUT_MS
+    if ((!alreadySpawned || historical) && pendingToolUseIds.size === 0) {
+      state.completed = true
+      delegate.emit({ time: delegate.elapsed(sessionId), type: 'agent_complete', payload: { name: agentName } }, sessionId)
+    }
   }
 
   // Watch for new content
@@ -156,12 +178,25 @@ export function readSubagentNewLines(
   const result = readNewFileLines(filePath, state.fileSize)
   if (!result) return
   state.fileSize = result.newSize
+  if (state.completed) {
+    state.completed = false
+    delegate.emit({ time: delegate.elapsed(sessionId), type: 'agent_spawn',
+      payload: { name: state.agentName, parent: ORCHESTRATOR_NAME, task: state.agentName } }, sessionId)
+  }
 
   // If inline progress events are handling this subagent, skip event emission
   // from the file watcher to avoid duplicates. We still advance fileSize above
   // so that if inline progress stops (e.g. reconnection), we resume from the
   // correct position without re-emitting old events.
   if (session.inlineProgressAgents.has(state.agentName)) {
+    // Inline messages and file records can arrive at different times. Usage is
+    // deduplicated by response ID, so keep reading the file's final counters.
+    for (const line of result.lines) {
+      try { parser.recordAssistantUsage(JSON.parse(line) as TranscriptEntry, state.agentName, session) } catch { /* incomplete record */ }
+    }
+    if (session.usageLedger?.snapshot(state.agentName)) {
+      delegate.emit({ time: delegate.elapsed(sessionId), type: 'context_update', payload: claudeContextPayload(session, state.agentName) }, sessionId)
+    }
     // Still keep the session alive — the subagent is working
     delegate.resetInactivityTimer(sessionId)
     return

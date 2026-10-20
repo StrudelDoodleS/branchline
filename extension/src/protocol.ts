@@ -158,6 +158,7 @@ export interface PendingToolCall {
 // ─── Session Types ──────────────────────────────────────────────────────────
 
 export interface SubagentState {
+  completed?: boolean
   watcher: import('fs').FSWatcher | null
   fileSize: number
   agentName: string
@@ -198,6 +199,7 @@ export interface WatchedSession {
   /** Latest reported context size, independently for each Claude agent. */
   contextTokensByAgent?: Map<string, number>
   contextResponsesByAgent?: Map<string, { current: string; seen: Set<string> }>
+  usageLedger?: import('./token-usage').UsageLedger
   permissionTimer: NodeJS.Timeout | null
   permissionEmitted: boolean
   contextBreakdown: {

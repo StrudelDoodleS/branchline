@@ -1,6 +1,7 @@
+// Branchline fork modifications; see FORK.md.
 import { useRef, useEffect, useCallback, type MutableRefObject } from 'react'
 import { Agent, ToolCallNode, Discovery, ANIM, NODE } from '@/lib/agent-types'
-import { BUBBLE_HOLD, BUBBLE_FADE_OUT, BUBBLE_MAX_W, TOOL_CARD_W, TOOL_CARD_H, DISC_BOUNDS_HALF_W, DISC_BOUNDS_HALF_H } from '@/lib/canvas-constants'
+import { BUBBLE_HOLD, BUBBLE_FADE_OUT, BUBBLE_MAX_W, TOOL_CARD_W, TOOL_CARD_H, DISC_BOUNDS_HALF_W, DISC_BOUNDS_HALF_H, MIN_VISIBLE_OPACITY } from '@/lib/canvas-constants'
 
 /** Extra padding added to agent node radii for auto-fit bounding box */
 const AUTOFIT_AGENT_PADDING = 22
@@ -101,6 +102,7 @@ export function useCanvasCamera({
 
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
     for (const [id, agent] of agents) {
+      if (!agent.isMain && agent.state === 'complete' && agent.opacity <= MIN_VISIBLE_OPACITY) continue
       if (focusScope && !focusScope.has(id)) continue
       const r = (agent.isMain ? NODE.radiusMain : NODE.radiusSub) + AUTOFIT_AGENT_PADDING
       minX = Math.min(minX, agent.x - r)

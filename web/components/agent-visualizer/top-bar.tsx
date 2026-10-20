@@ -5,7 +5,8 @@ import { memo, useLayoutEffect, useRef } from "react"
 import { Z } from "@/lib/agent-types"
 import { COLORS } from "@/lib/colors"
 import { formatTokens } from "@/lib/utils"
-import { agentCost } from "./canvas/draw-cost"
+import { formatApiCost } from "@/lib/usage"
+import type { UsageTotals } from "../../../extension/src/token-usage"
 import { SessionTabs } from "./session-tabs"
 import type { SessionInfo, ConnectionStatus } from "@/lib/bridge-types"
 
@@ -94,7 +95,7 @@ export interface TopBarProps {
   connectionStatus: ConnectionStatus
   // Stats
   agentCount: number
-  totalTokens: number
+  usage?: UsageTotals
   // Panel toggles
   showFileAttention: boolean
   showTranscript: boolean
@@ -111,7 +112,7 @@ export const TopBar = memo(function TopBar({
   sessions, selectedSessionId, sessionsWithActivity,
   onSelectSession, onCloseSession,
   isVSCode, connectionStatus,
-  agentCount, totalTokens,
+  agentCount, usage,
   showFileAttention, showTranscript, showCostOverlay, showTimeline, isMuted,
   onTogglePanel, onToggleTimeline, onToggleMute,
 }: TopBarProps) {
@@ -157,9 +158,9 @@ export const TopBar = memo(function TopBar({
           <ConnectionIndicator status={connectionStatus} />
           <span>{agentCount} agents</span>
           <span>
-            {formatTokens(totalTokens)} tokens
+            {usage ? `${formatTokens(usage.totalTokens)} tokens used` : 'Usage pending'}
             <span style={{ color: '#86efac', marginLeft: 6 }}>
-              ~${agentCost(totalTokens).toFixed(2)}
+              {usage ? formatApiCost(usage) : ''}
             </span>
           </span>
         </div>

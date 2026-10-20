@@ -27,6 +27,7 @@ import { summarizeInput, summarizeResult, extractInputData, detectError, buildDi
 import { estimateTokensFromContent, estimateTokensFromText } from './token-estimator'
 import { createLogger } from './logger'
 import { recordClaudeContext } from './claude-context'
+import { normalizeClaudeUsage, UsageLedger } from './token-usage'
 
 const log = createLogger('TranscriptParser')
 
@@ -215,9 +216,7 @@ export class TranscriptParser {
 
     const session = sessionId ? this.delegate.getSession(sessionId) : undefined
 
-    if (session && entry.type === 'assistant' && (!msg.model || isRealModelId(msg.model))) {
-      recordClaudeContext(session, agentName, msg.usage, msg.id || entry.uuid)
-    }
+    if (session) this.recordAssistantUsage(entry, agentName, session)
 
     // Extract model from assistant messages (updates tokensMax on the frontend).
     // Per-agent tracking: re-emit when the model changes (e.g. /model switch).
@@ -278,6 +277,19 @@ export class TranscriptParser {
     }
 
     if (session) { this.delegate.emitContextUpdate(agentName, session, sessionId) }
+  }
+
+  /** Used by live parsing and both main/subagent attach scans. */
+  recordAssistantUsage(entry: TranscriptEntry, agentName: string, session: WatchedSession): void {
+    const msg = entry.message
+    if (entry.type !== 'assistant' || !msg || (msg.model && !isRealModelId(msg.model))) return
+    recordClaudeContext(session, agentName, msg.usage, msg.id || entry.uuid)
+    const tokens = normalizeClaudeUsage(msg.usage)
+    const id = msg.id || entry.uuid
+    if (!tokens || !id) return
+    session.usageLedger ??= new UsageLedger()
+    const owner = session.usageLedger.record(id, agentName, msg.model ?? '', tokens)
+    if (owner && owner !== agentName) this.delegate.emitContextUpdate(owner, session, session.sessionId)
   }
 
   /** Process a text block — dedup, track tokens, emit message event */
@@ -557,9 +569,7 @@ export class TranscriptParser {
         if (!line.trim()) { continue }
         try {
           const entry = JSON.parse(line.trim()) as TranscriptEntry & { toolUseResult?: unknown }
-          if (entry.type === 'assistant' && (!entry.message?.model || isRealModelId(entry.message.model))) {
-            recordClaudeContext(session, ORCHESTRATOR_NAME, entry.message?.usage, entry.message?.id || entry.uuid)
-          }
+          this.recordAssistantUsage(entry, ORCHESTRATOR_NAME, session)
           if (entry.type === 'custom-title' && typeof entry.customTitle === 'string' && entry.customTitle.trim()) {
             session.label = entry.customTitle.trim()
             session.labelSet = true

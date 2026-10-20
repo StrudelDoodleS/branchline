@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 export { truncateText, drawTetherLine } from './draw-misc'
 export { drawEffects } from './draw-effects'
 export type { VisualEffect } from './draw-effects'
@@ -7,6 +8,6 @@ export { drawEdges, getActiveEdgeIds } from './draw-edges'
 export { drawParticles, buildEdgeMap } from './draw-particles'
 export { drawToolCalls } from './draw-tool-calls'
 export { drawDiscoveries, drawDiscoveryConnections } from './draw-discoveries'
-export { drawCostLabels, drawCostSummaryPanel, agentCost } from './draw-cost'
+export { drawCostLabels, agentCost } from './draw-cost'
 export { findAgentAt, findToolCallAt, findBubbleAgentAt, findDiscoveryAt } from './hit-detection'
 export { detectStateChanges } from './detect-state-changes'

@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 'use client'
 
 import { useState, useCallback, useRef, useEffect } from 'react'
@@ -87,7 +88,7 @@ export function useAgentSimulation(options: UseAgentSimulationOptions = {}) {
     const sim = forceSimRef.current
     if (!sim) return
 
-    const nodes: ForceNode[] = Array.from(agents.values()).map(a => ({
+    const nodes: ForceNode[] = Array.from(agents.values()).filter(a => a.isMain || a.state !== 'complete').map(a => ({
       id: a.id,
       x: a.x, y: a.y,
       vx: a.vx, vy: a.vy,
@@ -95,8 +96,9 @@ export function useAgentSimulation(options: UseAgentSimulationOptions = {}) {
       fy: a.pinned ? a.y : undefined,
     }))
 
+    const nodeIds = new Set(nodes.map(node => node.id))
     const links: ForceLink[] = edges
-      .filter(e => e.type === 'parent-child')
+      .filter(e => e.type === 'parent-child' && nodeIds.has(e.from) && nodeIds.has(e.to))
       .map(e => ({ id: e.id, source: e.from, target: e.to }))
 
     sim.nodes(nodes)

@@ -25,6 +25,8 @@ import { MOCK_DURATION } from "@/lib/mock-scenario"
 import { MessageFeedPanel } from "./message-feed-panel"
 import { TopBar } from "./top-bar"
 import { AgentTreeView } from "./agent-tree-view"
+import { UsagePanel } from "./usage-panel"
+import { sessionUsage } from "@/lib/usage"
 import { useAudioEffects } from "@/hooks/use-audio-effects"
 
 export function AgentVisualizer() {
@@ -80,7 +82,6 @@ export function AgentVisualizer() {
 
   // Mutually exclusive panel toggling — opening one closes the others
   const toggleExclusivePanel = useCallback((panel: 'files' | 'transcript' | 'cost') => {
-    if (panel === 'cost') setViewMode('graph')
     setShowFileAttention(prev => panel === 'files' ? !prev : false)
     setShowTranscript(prev => panel === 'transcript' ? !prev : false)
     setShowCostOverlay(prev => panel === 'cost' ? !prev : false)
@@ -236,11 +237,7 @@ export function AgentVisualizer() {
 
   useKeyboardShortcuts(keyboardActions)
 
-  const totalTokens = useMemo(() => {
-    let sum = 0
-    for (const a of agents.values()) sum += a.tokensUsed
-    return sum
-  }, [agents])
+  const usage = useMemo(() => sessionUsage(agents.values()), [agents])
 
   const selectedAgent = selection.selectedAgentId ? agents.get(selection.selectedAgentId) : null
   const selectedConversation = selection.selectedAgentId ? (conversations.get(selection.selectedAgentId) || []) : []
@@ -442,6 +439,8 @@ export function AgentVisualizer() {
       />
 
       {/* Timeline panel (slide-in from bottom) */}
+      <UsagePanel visible={showCostOverlay} agents={agents} onClose={() => setShowCostOverlay(false)} />
+
       <TimelinePanel
         visible={showTimeline}
         timelineEntries={timelineEntries}
@@ -467,7 +466,7 @@ export function AgentVisualizer() {
         isVSCode={bridge.isVSCode}
         connectionStatus={bridge.connectionStatus}
         agentCount={agents.size}
-        totalTokens={totalTokens}
+        usage={usage}
         showFileAttention={showFileAttention}
         showTranscript={showTranscript}
         showCostOverlay={showCostOverlay}

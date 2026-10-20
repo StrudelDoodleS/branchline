@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 /**
  * Unit tests for CodexRolloutParser.
  *
@@ -36,6 +37,73 @@ function runFixture() {
   for (const line of lines) parser.processLine(line, state)
   return { events, labels, state }
 }
+
+describe('Codex cumulative API usage', () => {
+  function run(records: unknown[]) {
+    const events: AgentEvent[] = []
+    const parser = new CodexRolloutParser({ emit: event => events.push(event), elapsed: () => 0 })
+    const state = createCodexRolloutState()
+    for (const record of records) parser.processLine(JSON.stringify(record), state)
+    return events.filter(e => e.type === 'context_update').at(-1)?.payload.usage as Record<string, number | null> | undefined
+  }
+  const model = (id: string) => ({ type: 'turn_context', payload: { model: id } })
+  const usage = (input: number, cached: number, output: number, lastInput = 1000, written = 0) => ({
+    type: 'event_msg', payload: { type: 'token_count', info: {
+      total_token_usage: { input_tokens: input, cached_input_tokens: cached, cache_write_input_tokens: written,
+        output_tokens: output, reasoning_output_tokens: output / 2, total_tokens: input + output },
+      last_token_usage: { input_tokens: lastInput }, model_context_window: 475000,
+    } },
+  })
+
+  it('uses cumulative counters, separates cached tokens, and ignores duplicate or older totals', () => {
+    const result = run([model('gpt-6.1-sol'), usage(10000, 8000, 200), usage(20000, 17000, 300), usage(20000, 17000, 300), usage(10000, 8000, 200)])
+    assert.equal(result?.inputTokens, 3000)
+    assert.equal(result?.cacheReadTokens, 17000)
+    assert.equal(result?.outputTokens, 300)
+    assert.equal(result?.totalTokens, 20300)
+    assert.ok(Math.abs(Number(result?.costUSD) - 0.0107) < 1e-10)
+  })
+
+  it('charges cache writes once and applies long context prices to the individual request', () => {
+    const result = run([model('gpt-6.1-sol'), usage(300000, 280000, 1000, 300000, 5000)])
+    assert.equal(result?.inputTokens, 15000)
+    assert.equal(result?.cacheWriteTokens, 5000)
+    assert.equal(result?.totalTokens, 301000)
+    assert.ok(Math.abs(Number(result?.costUSD) - 0.156) < 1e-10)
+  })
+
+  it('preserves earlier model costs on a switch and does not guess prices for unknown models', () => {
+    const switched = run([model('gpt-6.1-sol'), usage(10000, 8000, 200), model('gpt-6-astra'), usage(20000, 16000, 400)])
+    assert.ok(Math.abs(Number(switched?.costUSD) - 0.0448) < 1e-10)
+    const unknown = run([model('future-model'), usage(10000, 8000, 200)])
+    assert.equal(unknown?.totalTokens, 10200)
+    assert.equal(unknown?.costUSD, null)
+  })
+
+  it('uses response records for compaction usage and does not add their legacy mirrors', () => {
+    const raw = (input: number, cached: number, output: number) => ({ input_tokens: input, cached_input_tokens: cached,
+      cache_write_input_tokens: 0, output_tokens: output, reasoning_output_tokens: 0, total_tokens: input + output })
+    const response = (id: string, u: ReturnType<typeof raw>, thread: ReturnType<typeof raw>) => ({ type: 'token_usage_record', payload: { response_id: id, usage: u, thread_token_usage: thread } })
+    const first = response('one', raw(10000, 8000, 100), raw(10000, 8000, 100))
+    const result = run([model('gpt-6.1-sol'), usage(10000, 8000, 100), first,
+      response('compact', raw(20000, 18000, 200), raw(30000, 26000, 300)),
+      { type: 'compacted', payload: { replacement_history: [] } },
+      usage(11000, 8000, 110), response('three', raw(1000, 0, 10), raw(31000, 26000, 310)), first])
+    assert.equal(result?.inputTokens, 5000)
+    assert.equal(result?.totalTokens, 31310)
+    assert.ok(Math.abs(Number(result?.costUSD) - 0.0157) < 1e-10)
+  })
+
+  it('retains the legacy prefix when a resumed session begins recording response usage', () => {
+    const result = run([model('gpt-6.1-sol'), usage(10000, 8000, 100), {
+      type: 'token_usage_record', payload: { response_id: 'new-format',
+        usage: { input_tokens: 20000, cached_input_tokens: 18000, output_tokens: 200 },
+        thread_token_usage: { input_tokens: 30000, cached_input_tokens: 26000, output_tokens: 300 } },
+    }])
+    assert.equal(result?.totalTokens, 30300)
+    assert.ok(Math.abs(Number(result?.costUSD) - 0.0136) < 1e-10)
+  })
+})
 
 describe('CodexRolloutParser', () => {
   it('emits agent_spawn exactly once on the first record', () => {

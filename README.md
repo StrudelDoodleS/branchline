@@ -15,6 +15,14 @@ Branchline is an independent fork of [Agent Flow](https://github.com/patoles/age
 
 The original graph view, tool details, transcripts, file activity, and runtime selection remain available.
 
+## Usage and API costs
+
+The header and `$Cost` panel show cumulative recorded usage for the selected main session and its subagents: uncached input, output, cache reads, and cache writes. The panel separates Claude's one-hour writes. Reasoning is included in output, so it is counted once. Finished agents retain their usage.
+
+Costs use standard API list prices, verified on 20 October 2026, with each request's model and applicable prompt-length tier. Sources: [OpenAI pricing](https://developers.openai.com/api/docs/pricing), [Claude pricing](https://platform.claude.com/docs/en/about-claude/pricing). These are API-equivalent token costs; subscriptions, service-tier premiums, and server-side tool fees are outside this estimate. Unknown model rates show as unavailable.
+
+Claude response IDs deduplicate streaming blocks and transcript replays. Codex response usage records include compaction requests; older rollouts use cumulative token counters. Local transcripts restore usage after a server restart. Context bars continue to show current context fill separately.
+
 ## Run from source
 
 Use Node.js 22 or newer and pnpm 10. This fork is not published to npm or the VS Code marketplace.

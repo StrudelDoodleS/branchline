@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 'use client'
 
 import { useRef, useEffect, useState, useCallback } from 'react'
@@ -17,7 +18,7 @@ import {
   drawParticles, buildEdgeMap,
   drawToolCalls,
   drawDiscoveries, drawDiscoveryConnections,
-  drawCostLabels, drawCostSummaryPanel,
+  drawCostLabels,
   detectStateChanges as detectStateChangesPure,
 } from './canvas/index'
 import { useCanvasCamera } from '@/hooks/use-canvas-camera'
@@ -282,7 +283,6 @@ export function AgentCanvas({
 
       ctx.restore()
 
-      if (showCostOverlay) drawCostSummaryPanel(ctx, agents, toolCalls)
       if (bloomRef.current) bloomRef.current.apply(canvas, ctx)
 
       // ─── Performance overlay (enabled via ?perf or ?stress) ──────────

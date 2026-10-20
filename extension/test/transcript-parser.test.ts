@@ -16,6 +16,7 @@ import * as path from 'node:path'
 import { TranscriptParser, TranscriptParserDelegate, parseTaskNotification } from '../src/transcript-parser'
 import { AgentEvent, WatchedSession } from '../src/protocol'
 import { claudeContextPayload } from '../src/claude-context'
+import { scanSubagentsDir, readSubagentNewLines } from '../src/subagent-watcher'
 
 const SESSION_ID = 'session-1'
 
@@ -103,6 +104,91 @@ function taskNotification(toolUseId: string, status = 'completed', result = 'Fou
 }
 
 const ofType = (events: AgentEvent[], type: string) => events.filter(e => e.type === type)
+
+describe('Claude cumulative API usage', () => {
+  const response = (id: string, output = 100, model = 'claude-opus-5-5') => ({
+    type: 'assistant', uuid: `entry-${id}-${output}`,
+    message: { id, role: 'assistant', model, content: [{ type: 'text', text: 'Result' }],
+      usage: { input_tokens: 10, cache_read_input_tokens: 1000, cache_creation_input_tokens: 300,
+        cache_creation: { ephemeral_5m_input_tokens: 100, ephemeral_1h_input_tokens: 200 }, output_tokens: output,
+        output_tokens_details: { thinking_tokens: 40 } } },
+  })
+
+  it('counts each response once, updates streamed output, and preserves totals across context changes', () => {
+    const { session, feed } = setup()
+    feed(response('first', 50))
+    feed(response('first', 100))
+    feed(response('second'))
+    feed(response('first', 50)) // an old partial replay must not subtract usage
+    const usage = (claudeContextPayload(session, 'orchestrator') as Record<string, unknown>).usage as Record<string, number>
+    assert.equal(usage?.inputTokens, 20)
+    assert.equal(usage?.cacheReadTokens, 2000)
+    assert.equal(usage?.cacheWriteTokens, 600)
+    assert.equal(usage?.outputTokens, 200)
+    assert.equal(usage?.reasoningTokens, 80) // already included in output
+    assert.equal(usage?.totalTokens, 2820)
+    assert.ok(Math.abs(usage?.costUSD - 0.00868) < 1e-10)
+  })
+
+  it('restores historical totals on attach and does not charge catch-up responses again', () => {
+    const { session, parser, feed } = setup()
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'branchline-usage-'))
+    const file = path.join(directory, 'session.jsonl')
+    fs.writeFileSync(file, [response('one'), response('two'), response('one')].map(v => JSON.stringify(v)).join('\n') + '\n')
+    try {
+      parser.prescanExistingContent(file, fs.statSync(file).size, session)
+      feed(response('two'))
+      const usage = (claudeContextPayload(session, 'orchestrator') as Record<string, unknown>).usage as Record<string, number>
+      assert.equal(usage?.totalTokens, 2820)
+    } finally { fs.rmSync(directory, { recursive: true, force: true }) }
+  })
+
+  it('prices each response with its own model and keeps subagent totals separate', () => {
+    const { session, feed } = setup()
+    feed(response('opus'))
+    feed(response('sonnet', 100, 'claude-sonnet-5-5'))
+    feed(response('child'), 'Researcher')
+    const main = (claudeContextPayload(session, 'orchestrator') as Record<string, unknown>).usage as Record<string, number>
+    const child = (claudeContextPayload(session, 'Researcher') as Record<string, unknown>).usage as Record<string, number>
+    assert.equal(main?.totalTokens, 2820)
+    assert.ok(Math.abs(main?.costUSD - 0.00651) < 1e-10)
+    assert.equal(child?.totalTokens, 1410)
+  })
+
+  it('restores completed subagent usage and still reads counters while inline progress is active', () => {
+    const { session, parser, events } = setup()
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'branchline-child-usage-'))
+    const file = path.join(directory, 'agent-test.jsonl')
+    fs.writeFileSync(file, JSON.stringify(response('child-one')) + '\n')
+    fs.utimesSync(file, new Date(0), new Date(0))
+    fs.writeFileSync(file.replace('.jsonl', '.meta.json'), JSON.stringify({ description: 'Researcher' }))
+    session.subagentsDir = directory
+    const delegate = { emit: (event: AgentEvent) => events.push(event), elapsed: () => 0,
+      getSession: () => session, getLastActivityTime: () => 0, resetInactivityTimer: () => {} }
+    try {
+      const mainFile = path.join(directory, 'main.txt')
+      fs.writeFileSync(mainFile, JSON.stringify({ type: 'assistant', message: { role: 'assistant',
+        content: [{ type: 'tool_use', id: 'launch', name: 'Agent', input: { description: 'Researcher' } }] } }) + '\n')
+      parser.prescanExistingContent(mainFile, fs.statSync(mainFile).size, session)
+      assert.ok(session.spawnedSubagents.has('Researcher'))
+      scanSubagentsDir(delegate, parser, SESSION_ID)
+      const agent = session.subagentWatchers.get(file)!.agentName
+      assert.equal((claudeContextPayload(session, agent).usage)?.totalTokens, 1410)
+      assert.ok(events.some(e => e.type === 'agent_spawn' && e.payload.name === agent))
+      assert.ok(events.some(e => e.type === 'agent_complete' && e.payload.name === agent))
+      const spawnsBefore = events.filter(e => e.type === 'agent_spawn').length
+      session.inlineProgressAgents.add(agent)
+      fs.appendFileSync(file, JSON.stringify(response('child-two')) + '\n')
+      readSubagentNewLines(delegate, parser, file, SESSION_ID)
+      assert.equal((claudeContextPayload(session, agent).usage)?.totalTokens, 2820)
+      assert.equal(events.filter(e => e.type === 'agent_spawn').length, spawnsBefore + 1)
+    } finally {
+      session.subagentsDirWatcher?.close()
+      for (const state of session.subagentWatchers.values()) state.watcher?.close()
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+})
 
 describe('Claude context usage', () => {
   const response = (id: string, input: number, cached: number, created: number, output: number) => ({

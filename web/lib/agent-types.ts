@@ -19,6 +19,7 @@ export interface Agent {
   state: AgentState
   parentId: string | null
   tokensUsed: number
+  usage?: import('../../extension/src/token-usage').UsageTotals
   tokensMax: number
   contextBreakdown: ContextBreakdown
   toolCalls: number

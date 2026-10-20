@@ -1,10 +1,12 @@
-import type { Agent, ToolCallNode, Discovery } from '@/lib/agent-types'
-import { NODE } from '@/lib/agent-types'
+// Branchline fork modifications; see FORK.md.
+import type { Agent, ToolCallNode, Discovery } from '../../../lib/agent-types'
+import { NODE } from '../../../lib/agent-types'
 import {
   BUBBLE_MAX_W, BUBBLE_GAP,
   TOOL_MAX_CARD_W, getDiscoveryCardDimensions,
   AGENT_DRAW, HIT_DETECTION, BUBBLE_DRAW, TOOL_DRAW,
-} from '@/lib/canvas-constants'
+  MIN_VISIBLE_OPACITY,
+} from '../../../lib/canvas-constants'
 import { bubbleAlpha } from './bubble-utils'
 
 /**
@@ -17,6 +19,7 @@ export function findAgentAt(
   agents: Map<string, Agent>,
 ): string | null {
   for (const [id, agent] of agents) {
+    if (agent.opacity < MIN_VISIBLE_OPACITY) continue
     const size = agent.isMain ? NODE.radiusMain : NODE.radiusSub
     const dx = x - agent.x
     const dy = y - agent.y

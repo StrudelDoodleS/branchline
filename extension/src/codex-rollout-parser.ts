@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 /**
  * Parser for Codex rollout JSONL files at ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
  *
@@ -42,6 +43,7 @@ import {
 } from './tool-summarizer'
 import { estimateTokenCost, estimateTokensFromText } from './token-estimator'
 import { createLogger } from './logger'
+import { CodexUsageTracker } from './token-usage'
 
 const log = createLogger('CodexRolloutParser')
 
@@ -63,6 +65,7 @@ export interface PendingCodexToolCall {
 }
 
 export interface CodexRolloutState {
+  usage: CodexUsageTracker
   /** Model id from the most recent turn_context. Authoritative. */
   model: string | null
   /** Cwd from session_meta, updated by turn_context. */
@@ -87,6 +90,7 @@ export interface CodexRolloutState {
 
 export function createCodexRolloutState(): CodexRolloutState {
   return {
+    usage: new CodexUsageTracker(),
     model: null,
     cwd: null,
     label: null,
@@ -282,6 +286,12 @@ export class CodexRolloutParser {
         return this.handleResponseItem(record.payload, state)
       case 'event_msg':
         return this.handleEventMsg(record.payload, state)
+      case 'token_usage_record':
+        if (isRecord(record.payload)) {
+          state.usage.recordResponse(record.payload, state.model ?? '')
+          this.emitContextUpdate(state)
+        }
+        return
       case 'compacted':
         return this.handleCompacted(record.payload as CompactedPayload, state)
       // Ignore unknown types (forward-compatible).
@@ -534,6 +544,7 @@ export class CodexRolloutParser {
   private handleTokenCount(payload: Record<string, unknown>, state: CodexRolloutState): void {
     const info = payload.info
     if (!isRecord(info)) return
+    state.usage.record(info, state.model ?? '')
 
     if (typeof info.model_context_window === 'number' && info.model_context_window > 0) {
       state.reportedContextWindow = info.model_context_window
@@ -626,6 +637,7 @@ export class CodexRolloutParser {
         agent: ORCHESTRATOR_NAME,
         tokens,
         breakdown: { ...bd },
+        ...(state.usage.snapshot() ? { usage: state.usage.snapshot() } : {}),
         ...(state.reportedContextWindow ? { tokensMax: state.reportedContextWindow } : {}),
         ...(opts.authoritative ? { isAuthoritative: true } : {}),
       },

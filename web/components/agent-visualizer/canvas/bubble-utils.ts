@@ -1,4 +1,5 @@
-import { BUBBLE_FADE_IN, BUBBLE_HOLD, BUBBLE_FADE_OUT } from '@/lib/canvas-constants'
+// Branchline fork modifications; see FORK.md.
+import { BUBBLE_FADE_IN, BUBBLE_HOLD, BUBBLE_FADE_OUT } from '../../../lib/canvas-constants'
 
 /**
  * Compute the effective alpha for a message bubble given its age,

@@ -1,10 +1,11 @@
+// Branchline fork modifications; see FORK.md.
 import type { SimulationState } from './types'
 import {
   TOOL_MIN_DISPLAY_S, TOOL_MAX_RUNNING_S,
   DISCOVERY_HOLD_S, DISCOVERY_LERP_SPEED,
   BUBBLE_VISIBLE_S, MOCK_END_BUFFER_S,
   ANIM_SPEED,
-} from '@/lib/canvas-constants'
+} from '../../lib/canvas-constants'
 
 export interface AnimateOptions {
   useMockData: boolean
@@ -91,7 +92,7 @@ function cleanupFaded(
   // Cleanup faded agents (completed sub-agents) and their edges
   const fadedAgentIds: string[] = []
   for (const [id, agent] of newAgents) {
-    if (!agent.isMain && agent.state === 'complete' && agent.opacity <= 0) {
+    if (!agent.isMain && agent.state === 'complete' && agent.opacity <= 0 && !agent.usage) {
       fadedAgentIds.push(id)
     }
   }
