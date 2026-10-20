@@ -170,6 +170,9 @@ function resetInactivityTimer(sessionId: string) {
   if (session.inactivityTimer) clearTimeout(session.inactivityTimer)
   session.inactivityTimer = setTimeout(() => {
     if (!session.sessionCompleted && session.sessionDetected) {
+      // Subagent turn boundaries, rather than a quiet tool, determine when
+      // child work is done. Main completion would otherwise hide them too.
+      if ([...session.subagentWatchers.values()].some(sub => sub.spawnEmitted && !sub.completed)) return
       log(`[session] ${sessionId.slice(0, SESSION_ID_DISPLAY)} inactive`)
       session.sessionCompleted = true
       broadcastEvent({

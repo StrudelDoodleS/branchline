@@ -9,7 +9,7 @@
 import {
   AgentEvent, PendingToolCall, WatchedSession,
   TranscriptEntry, ToolUseBlock, ToolResultBlock,
-  emitSubagentSpawn,
+  emitSubagentSpawn, markSubagentCompleted,
 } from './protocol'
 import { readFileChunk } from './fs-utils'
 import {
@@ -196,6 +196,7 @@ export class TranscriptParser {
       sessionId: parsed.sessionId as string,
       type: parsed.type as string,
       uuid: parsed.uuid as string | undefined,
+      timestamp: typeof parsed.timestamp === 'string' ? parsed.timestamp : undefined,
       message: msg,
     }
 
@@ -204,7 +205,7 @@ export class TranscriptParser {
     // itself is still filtered below as system-injected content.
     if (entry.type === 'user') {
       const notification = parseTaskNotification(userContentText(msg.content))
-      if (notification) { this.handleTaskNotification(notification, sessionId) }
+      if (notification) { this.handleTaskNotification(notification, sessionId, entry.timestamp) }
     }
 
     // Try to set session label from first user message (for live events after session start)
@@ -268,7 +269,7 @@ export class TranscriptParser {
         ctxSeen.add(toolBlock.id)
         this.handleToolUse(toolBlock, agentName, ctxPending, sessionId)
       } else if (block.type === 'tool_result') {
-        this.handleToolResult(block as ToolResultBlock, agentName, ctxPending, sessionId, parsed.toolUseResult)
+        this.handleToolResult(block as ToolResultBlock, agentName, ctxPending, sessionId, parsed.toolUseResult, entry.timestamp)
       } else if (block.type === 'text' && 'text' in block) {
         this.handleTextBlock(block, emitRole, entry.uuid, agentName, seenMsgs, session, sessionId)
       } else if (block.type === 'thinking' && 'thinking' in block) {
@@ -377,6 +378,7 @@ export class TranscriptParser {
       this.subagentChildNames.set(block.id, childName)
       // Only emit spawn once per subagent name (file watcher may have already spawned it)
       const session = sessionId ? this.delegate.getSession(sessionId) : undefined
+      session?.subagentCompletions?.delete(childName)
       if (!session?.spawnedSubagents.has(childName)) {
         session?.spawnedSubagents.add(childName)
         emitSubagentSpawn(this.delegate, agentName, childName, args, sessionId)
@@ -402,6 +404,7 @@ export class TranscriptParser {
     ctxPending: Map<string, PendingToolCall>,
     sessionId?: string,
     toolUseResult?: unknown,
+    timestamp?: string,
   ): void {
     const pending = ctxPending.get(block.tool_use_id)
     // Skip orphaned tool_results (their tool_use was deduped during catch-up)
@@ -440,7 +443,7 @@ export class TranscriptParser {
         // Clean up inline subagent tracking state
         this.subagentChildNames.delete(block.tool_use_id)
         this.inlineSubagentState.delete(block.tool_use_id)
-        this.emitSubagentFinished(childName, agentName, result, sessionId)
+        this.emitSubagentFinished(childName, agentName, result, sessionId, timestamp)
       }
     }
 
@@ -468,7 +471,12 @@ export class TranscriptParser {
     }
   }
 
-  private emitSubagentFinished(childName: string, parent: string, summary: string, sessionId?: string): void {
+  private emitSubagentFinished(childName: string, parent: string, summary: string, sessionId?: string, timestamp?: string): void {
+    const session = sessionId ? this.delegate.getSession(sessionId) : undefined
+    if (session) this.rememberSubagentCompletion(session, childName, timestamp ?? new Date().toISOString())
+    for (const subagent of session?.subagentWatchers.values() ?? []) {
+      if (subagent.agentName === childName) markSubagentCompleted(subagent)
+    }
     this.delegate.emit({
       time: this.delegate.elapsed(sessionId),
       type: 'subagent_return',
@@ -479,6 +487,11 @@ export class TranscriptParser {
       type: 'agent_complete',
       payload: { name: childName },
     }, sessionId)
+  }
+
+  private rememberSubagentCompletion(session: WatchedSession, childName: string, timestamp?: string): void {
+    const completions = session.subagentCompletions ??= new Map()
+    completions.set(childName, Math.max(completions.get(childName) ?? 0, Date.parse(timestamp ?? '') || 0))
   }
 
   /** Report a subagent's model from the parent transcript, unless its own
@@ -497,6 +510,7 @@ export class TranscriptParser {
   private handleTaskNotification(
     notification: { toolUseId: string; status: string; summary: string },
     sessionId?: string,
+    timestamp?: string,
   ): void {
     const bg = this.backgroundSubagents.get(notification.toolUseId)
     if (!bg) return
@@ -506,7 +520,7 @@ export class TranscriptParser {
     const summary = notification.status === 'completed'
       ? notification.summary
       : `[${notification.status}] ${notification.summary}`.trim()
-    this.emitSubagentFinished(bg.childName, bg.parent, summary, sessionId)
+    this.emitSubagentFinished(bg.childName, bg.parent, summary, sessionId, timestamp)
   }
 
   /**
@@ -578,7 +592,12 @@ export class TranscriptParser {
           // <task-notification> that arrives later can complete them.
           if (entry.type === 'user' && entry.message) {
             const notification = parseTaskNotification(userContentText(entry.message.content))
-            if (notification) { this.backgroundSubagents.delete(notification.toolUseId) }
+            if (notification) {
+              const childName = this.backgroundSubagents.get(notification.toolUseId)?.childName
+                ?? this.subagentChildNames.get(notification.toolUseId)
+              if (childName) this.rememberSubagentCompletion(session, childName, entry.timestamp)
+              this.backgroundSubagents.delete(notification.toolUseId)
+            }
           }
           // Build dedup sets for tool_use blocks and messages + accumulate token counts
           const isUser = entry.message?.role === 'user' || entry.message?.role === 'human'
@@ -586,11 +605,13 @@ export class TranscriptParser {
             for (const block of entry.message.content) {
               if (block.type === 'tool_use' && (block as ToolUseBlock).id) {
                 const toolBlock = block as ToolUseBlock
+                const firstSeen = !session.seenToolUseIds.has(toolBlock.id)
                 session.seenToolUseIds.add(toolBlock.id)
                 // Track subagent names so startWatchingSubagentFile assigns correct names
                 // and handleToolResult can resolve the child name on completion
                 if (toolBlock.name === 'Agent' || toolBlock.name === 'Task') {
                   const childName = resolveSubagentChildName(toolBlock.input)
+                  if (firstSeen) session.subagentCompletions?.delete(childName)
                   session.spawnedSubagents.add(childName)
                   this.subagentChildNames.set(toolBlock.id, childName)
                 }
@@ -604,6 +625,8 @@ export class TranscriptParser {
                 const childName = resultBlock.tool_use_id ? this.subagentChildNames.get(resultBlock.tool_use_id) : undefined
                 if (childName && parseAgentToolUseResult(entry.toolUseResult).isAsync) {
                   this.backgroundSubagents.set(resultBlock.tool_use_id, { childName, parent: ORCHESTRATOR_NAME, sessionId: session.sessionId })
+                } else if (childName && session.pendingToolCalls.has(resultBlock.tool_use_id)) {
+                  this.rememberSubagentCompletion(session, childName, entry.timestamp)
                 }
                 // Clear matched pending tool call
                 if (resultBlock.tool_use_id) {

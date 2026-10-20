@@ -12,7 +12,7 @@
 
 import * as fs from 'fs'
 import * as path from 'path'
-import { AgentEvent, SubagentState, WatchedSession, TranscriptEntry, emitSubagentSpawn } from './protocol'
+import { AgentEvent, SubagentState, WatchedSession, TranscriptEntry, emitSubagentSpawn, markSubagentCompleted } from './protocol'
 import { SESSION_ID_DISPLAY, ORCHESTRATOR_NAME, INACTIVITY_TIMEOUT_MS, generateSubagentFallbackName, resolveSubagentChildName } from './constants'
 import { readNewFileLines } from './fs-utils'
 import { TranscriptParser } from './transcript-parser'
@@ -21,6 +21,57 @@ import { createLogger } from './logger'
 import { claudeContextPayload } from './claude-context'
 
 const log = createLogger('SubagentWatcher')
+
+function isConversationEntry(value: unknown): value is TranscriptEntry {
+  if (!value || typeof value !== 'object') return false
+  const entry = value as TranscriptEntry
+  return (entry.type === 'assistant' || entry.type === 'user') && !!entry.message
+}
+
+/** A subagent can finish with unmatched old tools after interruption/compaction.
+ * Its actual turn boundary takes precedence over those leftover tool IDs. */
+function isFinishedTurn(entry: TranscriptEntry): boolean {
+  if (entry.type === 'assistant') {
+    return entry.message.stop_reason === 'end_turn' || entry.message.stop_reason === 'stop_sequence'
+  }
+  const content = entry.message.content
+  const text = typeof content === 'string' ? content
+    : Array.isArray(content) ? content.filter(block => block.type === 'text').map(block => 'text' in block ? String(block.text ?? '') : '').join('\n') : ''
+  return /^\[Request interrupted by user(?: for tool use)?\]$/.test(text.trim())
+}
+
+/** Ignore replayed response/entry identities for lifecycle, while usage still
+ * receives every record so late streaming counters can update the ledger. */
+function trackTurn(entry: TranscriptEntry, state: SubagentState): 'active' | 'complete' | null {
+  const turn = state.turn ??= { finished: false, seenResponses: new Set(), seenUsers: new Set() }
+  if (entry.type === 'user') {
+    if (entry.uuid) {
+      if (turn.seenUsers.has(entry.uuid)) return null
+      turn.seenUsers.add(entry.uuid)
+    }
+    if (isFinishedTurn(entry)) {
+      turn.finished = true
+      return 'complete'
+    }
+    turn.responseId = undefined
+    turn.finished = false
+    return 'active'
+  }
+  const responseId = entry.message.id || entry.uuid
+  if (responseId) {
+    if (turn.seenResponses.has(responseId) && (turn.responseId !== responseId || turn.finished)) return null
+    turn.seenResponses.add(responseId)
+    turn.responseId = responseId
+  }
+  turn.finished = isFinishedTurn(entry)
+  return turn.finished ? 'complete' : 'active'
+}
+
+function completeSubagent(delegate: SubagentWatcherDelegate, state: SubagentState, sessionId: string): void {
+  if (state.completed) return
+  markSubagentCompleted(state)
+  delegate.emit({ time: delegate.elapsed(sessionId), type: 'agent_complete', payload: { name: state.agentName } }, sessionId)
+}
 
 export interface SubagentWatcherDelegate extends PermissionDetectionDelegate {
   getSession(sessionId: string): WatchedSession | undefined
@@ -99,61 +150,66 @@ function startWatchingSubagentFile(
   }
   session.subagentWatchers.set(filePath, state)
 
-  // Pre-scan existing content for dedup IDs and determine if the subagent
-  // is still active (has unmatched tool_use blocks = pending work).
+  // Restore the latest conversation turn, excluding API request blobs, which
+  // can contain copies of old tools. Keep partial lines for the next read.
   const pendingToolUseIds = new Set<string>()
   let lastModel: string | undefined
+  let finishedTurn = false
+  let latestActivityTime = 0
   try {
-    const stat = fs.statSync(filePath)
-    if (stat.size > 0) {
-      const content = fs.readFileSync(filePath, 'utf-8')
-      for (const line of content.split(/\r?\n/)) {
-        if (!line.trim()) continue
+    const initial = readNewFileLines(filePath, 0)
+    if (initial) {
+      state.fileSize = initial.newSize
+      state.fileTail = initial.tail
+      for (const line of initial.lines) {
         try {
           const raw: unknown = JSON.parse(line.trim())
-          if (raw && typeof raw === 'object') {
-            const transcript = raw as TranscriptEntry
-            parser.recordAssistantUsage(transcript, agentName, session)
-            if (transcript.type === 'assistant' && transcript.message?.model && !transcript.message.model.startsWith('<')) lastModel = transcript.message.model
-          }
-          const entry = raw as { message?: { content?: Array<{ type: string; id?: string; tool_use_id?: string }> } }
-          if (raw && typeof raw === 'object' && entry.message && Array.isArray(entry.message.content)) {
-            for (const block of entry.message.content) {
-              if (block.type === 'tool_use' && block.id) {
+          if (!isConversationEntry(raw)) continue
+          latestActivityTime = Math.max(latestActivityTime, Date.parse(raw.timestamp ?? '') || 0)
+          parser.recordAssistantUsage(raw, agentName, session)
+          if (raw.type === 'assistant' && raw.message.model && !raw.message.model.startsWith('<')) lastModel = raw.message.model
+          const turn = trackTurn(raw, state)
+          if (turn !== null) finishedTurn = turn === 'complete'
+          if (Array.isArray(raw.message.content)) {
+            for (const block of raw.message.content) {
+              if (block.type === 'tool_use' && typeof block.id === 'string') {
                 state.seenToolUseIds.add(block.id)
                 pendingToolUseIds.add(block.id)
-              } else if (block.type === 'tool_result' && block.tool_use_id) {
+              } else if (block.type === 'tool_result' && typeof block.tool_use_id === 'string') {
                 pendingToolUseIds.delete(block.tool_use_id)
               }
             }
           }
+          if (finishedTurn) pendingToolUseIds.clear()
         } catch { /* skip unparseable subagent transcript lines */ }
       }
-      state.fileSize = stat.size
     }
   } catch (err) { log.debug('Subagent initial read failed:', err) }
 
-  // Only emit spawn for subagents that are still active (have pending work)
-  // AND haven't already been spawned by the transcript parser.
+  const parentCompletion = session.subagentCompletions?.get(agentName)
+  if (parentCompletion !== undefined && latestActivityTime <= parentCompletion) finishedTurn = true
+
+  // Restore active and historical identities before their usage/final status.
   const alreadySpawned = session.spawnedSubagents.has(agentName)
   const hasUsage = !!session.usageLedger?.snapshot(agentName)
-  state.spawnEmitted = pendingToolUseIds.size > 0 || alreadySpawned || hasUsage
-  if ((pendingToolUseIds.size > 0 || hasUsage) && !alreadySpawned) {
+  state.spawnEmitted = pendingToolUseIds.size > 0 || alreadySpawned || hasUsage || finishedTurn
+  if ((pendingToolUseIds.size > 0 || hasUsage || finishedTurn) && !alreadySpawned) {
     session.spawnedSubagents.add(agentName)
     emitSubagentSpawn(delegate, ORCHESTRATOR_NAME, agentName, agentName, sessionId)
   }
-  if (hasUsage) {
+  if (hasUsage || finishedTurn) {
     // The main attach scan reserves child names without emitting identities.
     // Restore identity before usage even when that name was already reserved.
     if (alreadySpawned) delegate.emit({ time: delegate.elapsed(sessionId), type: 'agent_spawn',
       payload: { name: agentName, parent: ORCHESTRATOR_NAME, task: agentName } }, sessionId)
-    if (lastModel) delegate.emit({ time: delegate.elapsed(sessionId), type: 'model_detected', payload: { agent: agentName, model: lastModel } }, sessionId)
-    delegate.emit({ time: delegate.elapsed(sessionId), type: 'context_update', payload: claudeContextPayload(session, agentName) }, sessionId)
-    const historical = Date.now() - fs.statSync(filePath).mtimeMs > INACTIVITY_TIMEOUT_MS
-    if ((!alreadySpawned || historical) && pendingToolUseIds.size === 0) {
-      state.completed = true
-      delegate.emit({ time: delegate.elapsed(sessionId), type: 'agent_complete', payload: { name: agentName } }, sessionId)
+    if (hasUsage) {
+      if (lastModel) delegate.emit({ time: delegate.elapsed(sessionId), type: 'model_detected', payload: { agent: agentName, model: lastModel } }, sessionId)
+      delegate.emit({ time: delegate.elapsed(sessionId), type: 'context_update', payload: claudeContextPayload(session, agentName) }, sessionId)
     }
+  }
+  const historical = Date.now() - fs.statSync(filePath).mtimeMs > INACTIVITY_TIMEOUT_MS
+  if (finishedTurn || (hasUsage && historical && pendingToolUseIds.size === 0)) {
+    completeSubagent(delegate, state, sessionId)
   }
 
   // Watch for new content
@@ -175,49 +231,50 @@ export function readSubagentNewLines(
   const state = session.subagentWatchers.get(filePath)
   if (!state) return
 
-  const result = readNewFileLines(filePath, state.fileSize)
+  const result = readNewFileLines(filePath, state.fileSize, state.fileTail)
   if (!result) return
   state.fileSize = result.newSize
-  if (state.completed) {
-    state.completed = false
-    delegate.emit({ time: delegate.elapsed(sessionId), type: 'agent_spawn',
-      payload: { name: state.agentName, parent: ORCHESTRATOR_NAME, task: state.agentName } }, sessionId)
-  }
+  state.fileTail = result.tail
 
-  // If inline progress events are handling this subagent, skip event emission
-  // from the file watcher to avoid duplicates. We still advance fileSize above
-  // so that if inline progress stops (e.g. reconnection), we resume from the
-  // correct position without re-emitting old events.
-  if (session.inlineProgressAgents.has(state.agentName)) {
-    // Inline messages and file records can arrive at different times. Usage is
-    // deduplicated by response ID, so keep reading the file's final counters.
-    for (const line of result.lines) {
-      try { parser.recordAssistantUsage(JSON.parse(line) as TranscriptEntry, state.agentName, session) } catch { /* incomplete record */ }
-    }
-    if (session.usageLedger?.snapshot(state.agentName)) {
-      delegate.emit({ time: delegate.elapsed(sessionId), type: 'context_update', payload: claudeContextPayload(session, state.agentName) }, sessionId)
-    }
-    // Still keep the session alive — the subagent is working
-    delegate.resetInactivityTimer(sessionId)
-    return
-  }
-
-  // Lazily emit spawn on first new content if not already emitted
-  if (!state.spawnEmitted) {
-    state.spawnEmitted = true
-    if (!session.spawnedSubagents.has(state.agentName)) {
-      session.spawnedSubagents.add(state.agentName)
-      emitSubagentSpawn(delegate, ORCHESTRATOR_NAME, state.agentName, state.agentName, sessionId)
-    }
-  }
-
+  const inline = session.inlineProgressAgents.has(state.agentName)
+  let hasConversation = false
   for (const line of result.lines) {
-    parser.processTranscriptLine(line, state.agentName, state.pendingToolCalls, state.seenToolUseIds, sessionId)
+    let entry: unknown
+    try { entry = JSON.parse(line) } catch { continue }
+    if (!isConversationEntry(entry)) continue
+    hasConversation = true
+    const turn = trackTurn(entry, state)
+    // File metadata and repeated final counters must never revive an agent.
+    if (state.completed && turn === 'active') {
+      state.completed = false
+      delegate.emit({ time: delegate.elapsed(sessionId), type: 'agent_spawn',
+        payload: { name: state.agentName, parent: ORCHESTRATOR_NAME, task: state.agentName } }, sessionId)
+    }
+    if (!state.spawnEmitted) {
+      state.spawnEmitted = true
+      if (!session.spawnedSubagents.has(state.agentName)) {
+        session.spawnedSubagents.add(state.agentName)
+        emitSubagentSpawn(delegate, ORCHESTRATOR_NAME, state.agentName, state.agentName, sessionId)
+      }
+    }
+
+    // Inline progress already supplies messages/tools. The transcript still
+    // owns turn boundaries and final usage, which can arrive later.
+    if (inline) {
+      parser.recordAssistantUsage(entry, state.agentName, session)
+    } else {
+      parser.processTranscriptLine(line, state.agentName, state.pendingToolCalls, state.seenToolUseIds, sessionId)
+    }
+    if (turn === 'complete') completeSubagent(delegate, state, sessionId)
+  }
+  if (inline && hasConversation && session.usageLedger?.snapshot(state.agentName)) {
+    delegate.emit({ time: delegate.elapsed(sessionId), type: 'context_update', payload: claudeContextPayload(session, state.agentName) }, sessionId)
   }
 
-  // Permission detection for subagent tools
-  handlePermissionDetection(delegate, state.agentName, state.pendingToolCalls, state, sessionId)
+  if (!inline && !state.completed && hasConversation) {
+    handlePermissionDetection(delegate, state.agentName, state.pendingToolCalls, state, sessionId)
+  }
 
   // Keep main session alive while subagents are working
-  delegate.resetInactivityTimer(sessionId)
+  if (hasConversation) delegate.resetInactivityTimer(sessionId)
 }

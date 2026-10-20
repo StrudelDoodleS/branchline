@@ -531,6 +531,9 @@ export class SessionWatcher implements AgentSessionWatcher {
 
     session.inactivityTimer = setTimeout(() => {
       if (!session.sessionCompleted && session.sessionDetected) {
+        // A quiet tool or extended thinking is still work. Finishing the main
+        // would also mark its live children done in the visualizer.
+        if ([...session.subagentWatchers.values()].some(sub => sub.spawnEmitted && !sub.completed)) return
         log.info(`Session ${sessionId.slice(0, SESSION_ID_DISPLAY)} inactive — emitting orchestrator completion`)
         session.sessionCompleted = true
         this.emit({

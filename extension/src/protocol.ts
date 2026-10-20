@@ -70,6 +70,7 @@ export type WebviewToExtensionMessage =
 
 export interface TranscriptEntry {
   customTitle?: string
+  timestamp?: string
   sessionId: string
   type: string
   uuid?: string
@@ -77,6 +78,7 @@ export interface TranscriptEntry {
     id?: string
     role: string
     model?: string
+    stop_reason?: string | null
     usage?: unknown
     content: Array<TranscriptContentBlock> | string
   }
@@ -159,14 +161,31 @@ export interface PendingToolCall {
 
 export interface SubagentState {
   completed?: boolean
+  turn?: {
+    responseId?: string
+    finished: boolean
+    seenResponses: Set<string>
+    seenUsers: Set<string>
+  }
   watcher: import('fs').FSWatcher | null
   fileSize: number
+  fileTail?: string
   agentName: string
   pendingToolCalls: Map<string, PendingToolCall>
   seenToolUseIds: Set<string>
   permissionTimer: NodeJS.Timeout | null
   permissionEmitted: boolean
   spawnEmitted: boolean
+}
+
+/** Share completion bookkeeping between parent notifications and child files. */
+export function markSubagentCompleted(state: SubagentState): void {
+  state.completed = true
+  if (state.turn) state.turn.finished = true
+  state.pendingToolCalls.clear()
+  if (state.permissionTimer) clearTimeout(state.permissionTimer)
+  state.permissionTimer = null
+  state.permissionEmitted = false
 }
 
 /** State tracked for a single watched Claude Code session */
@@ -187,6 +206,8 @@ export interface WatchedSession {
   subagentWatchers: Map<string, SubagentState>
   /** Names of subagents already spawned (by transcript parser or file watcher) — prevents duplicate spawns */
   spawnedSubagents: Set<string>
+  /** Parent completion times restored on attach; newer child activity wins. */
+  subagentCompletions?: Map<string, number>
   /** Subagent names currently receiving inline progress events — file watcher skips these */
   inlineProgressAgents: Set<string>
   subagentsDirWatcher: import('fs').FSWatcher | null

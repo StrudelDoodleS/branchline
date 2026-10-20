@@ -105,6 +105,150 @@ function taskNotification(toolUseId: string, status = 'completed', result = 'Fou
 
 const ofType = (events: AgentEvent[], type: string) => events.filter(e => e.type === type)
 
+describe('subagent transcript lifecycle', () => {
+  const response = (id: string, stop: string | null, content: unknown[] = [{ type: 'text', text: 'Finished' }]) => ({
+    type: 'assistant', uuid: `entry-${id}`, message: { id, role: 'assistant', model: 'claude-opus-5-5',
+      stop_reason: stop, content, usage: { input_tokens: 10, output_tokens: 10 } },
+  })
+  const pending = response('old-tool', 'tool_use', [{ type: 'tool_use', id: 'unmatched', name: 'Bash', input: { command: 'work' } }])
+  const resume = { type: 'user', uuid: 'resume', message: { role: 'user', content: 'Please continue' } }
+  const metadata = { type: 'api-request-blob', message: { content: [{ type: 'tool_use', id: 'blob-tool', name: 'Bash' }] } }
+
+  function fixture(entries: unknown[], historical = false, reserved = false) {
+    const { session, parser, events } = setup()
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'branchline-child-lifecycle-'))
+    const file = path.join(directory, 'agent-test.jsonl')
+    fs.writeFileSync(file, entries.map(entry => JSON.stringify(entry)).join('\n') + '\n')
+    if (historical) fs.utimesSync(file, new Date(0), new Date(0))
+    fs.writeFileSync(file.replace('.jsonl', '.meta.json'), JSON.stringify({ description: 'Researcher' }))
+    session.subagentsDir = directory
+    if (reserved) session.spawnedSubagents.add('Researcher')
+    const delegate = { emit: (event: AgentEvent) => events.push(event), elapsed: () => 0,
+      getSession: () => session, getLastActivityTime: () => 0, resetInactivityTimer: () => {} }
+    scanSubagentsDir(delegate, parser, SESSION_ID)
+    const read = () => readSubagentNewLines(delegate, parser, file, SESSION_ID)
+    const append = (entry: unknown) => { fs.appendFileSync(file, JSON.stringify(entry) + '\n'); read() }
+    const lifecycle = () => events.filter(event => ['agent_spawn', 'agent_complete'].includes(event.type)).map(event => event.type)
+    const close = () => {
+      session.subagentsDirWatcher?.close()
+      for (const state of session.subagentWatchers.values()) {
+        state.watcher?.close()
+        if (state.permissionTimer) clearTimeout(state.permissionTimer)
+      }
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+    return { session, events, file, read, append, lifecycle, close }
+  }
+
+  it('restores a just-finished turn as done despite old unmatched tools and request blobs', () => {
+    const f = fixture([pending, response('finished', 'end_turn'), metadata])
+    try { assert.deepEqual(f.lifecycle(), ['agent_spawn', 'agent_complete']) }
+    finally { f.close() }
+  })
+
+  it('restores an interrupted subagent as done despite unmatched tools', () => {
+    const f = fixture([pending, { type: 'user', message: { role: 'user', content: [{ type: 'text', text: '[Request interrupted by user]' }] } }])
+    try { assert.deepEqual(f.lifecycle(), ['agent_spawn', 'agent_complete']) }
+    finally { f.close() }
+  })
+
+  for (const reserved of [false, true]) {
+    it(`restores an interruption before any assistant usage with parent identity ${reserved ? 'reserved' : 'unknown'}`, () => {
+      const f = fixture([{ type: 'user', message: { role: 'user', content: '[Request interrupted by user]' } }], false, reserved)
+      try { assert.deepEqual(f.lifecycle(), ['agent_spawn', 'agent_complete']) }
+      finally { f.close() }
+    })
+  }
+
+  it('keeps a resumed subagent active when the most recent turn has pending work', () => {
+    const f = fixture([response('finished', 'end_turn'), resume, pending], true)
+    try { assert.deepEqual(f.lifecycle(), ['agent_spawn']) }
+    finally { f.close() }
+  })
+
+  it('keeps a freshly discovered agent active while it thinks without a tool call', () => {
+    const f = fixture([response('thinking', null, [{ type: 'thinking', thinking: 'Working through the problem' }])])
+    try { assert.deepEqual(f.lifecycle(), ['agent_spawn']) }
+    finally { f.close() }
+  })
+
+  it('finishes a live turn and cancels permission detection without losing usage', () => {
+    const f = fixture([pending])
+    try {
+      f.append(response('new-tool', 'tool_use', [{ type: 'tool_use', id: 'current-tool', name: 'Bash', input: { command: 'work' } }]))
+      f.append(response('finished', 'end_turn'))
+      assert.deepEqual(f.lifecycle(), ['agent_spawn', 'agent_complete'])
+      assert.equal(f.session.subagentWatchers.get(f.file)?.permissionTimer, null)
+      assert.equal(claudeContextPayload(f.session, 'Researcher').usage?.totalTokens, 60)
+    } finally { f.close() }
+  })
+
+  it('does not reactivate a completed agent for metadata or repeated final usage', () => {
+    const finished = response('finished', 'end_turn')
+    const f = fixture([finished], true)
+    try {
+      f.append(metadata)
+      f.append(finished)
+      assert.deepEqual(f.lifecycle(), ['agent_spawn', 'agent_complete'])
+      assert.equal(claudeContextPayload(f.session, 'Researcher').usage?.totalTokens, 20)
+    } finally { f.close() }
+  })
+
+  it('does not reactivate a finished response when an older partial is replayed', () => {
+    const f = fixture([response('finished', 'end_turn')], true)
+    try {
+      f.append(response('finished', null))
+      assert.deepEqual(f.lifecycle(), ['agent_spawn', 'agent_complete'])
+      assert.equal(claudeContextPayload(f.session, 'Researcher').usage?.totalTokens, 20)
+    } finally { f.close() }
+  })
+
+  it('does not finish new work when a completed response or old user entry is replayed', () => {
+    const f = fixture([resume, response('finished', 'end_turn')], true)
+    try {
+      f.append({ ...resume, uuid: 'resume-again' })
+      f.append(response('working', null))
+      f.append(response('finished', 'end_turn'))
+      f.append(resume)
+      assert.deepEqual(f.lifecycle(), ['agent_spawn', 'agent_complete', 'agent_spawn'])
+      assert.equal(claudeContextPayload(f.session, 'Researcher').usage?.totalTokens, 40)
+    } finally { f.close() }
+  })
+
+  it('ignores an old completion replay when restoring a newer turn on attach', () => {
+    const f = fixture([response('finished', 'end_turn'), resume, pending, response('finished', 'end_turn')])
+    try { assert.deepEqual(f.lifecycle(), ['agent_spawn']) }
+    finally { f.close() }
+  })
+
+  for (const inline of [false, true]) {
+    it(`reactivates on a new message and completes again with inline progress ${inline ? 'on' : 'off'}`, () => {
+      const f = fixture([response('finished', 'end_turn')], true)
+      try {
+        if (inline) f.session.inlineProgressAgents.add('Researcher')
+        f.append(resume)
+        assert.deepEqual(f.lifecycle(), ['agent_spawn', 'agent_complete', 'agent_spawn'])
+        f.append(response('resumed-finish', 'end_turn'))
+        assert.deepEqual(f.lifecycle(), ['agent_spawn', 'agent_complete', 'agent_spawn', 'agent_complete'])
+        assert.equal(claudeContextPayload(f.session, 'Researcher').usage?.totalTokens, 40)
+      } finally { f.close() }
+    })
+  }
+
+  it('keeps a completion record split across file writes', () => {
+    const f = fixture([pending])
+    try {
+      const line = JSON.stringify(response('finished', 'end_turn')) + '\n'
+      const split = Math.floor(line.length / 2)
+      fs.appendFileSync(f.file, line.slice(0, split))
+      f.read()
+      fs.appendFileSync(f.file, line.slice(split))
+      f.read()
+      assert.deepEqual(f.lifecycle(), ['agent_spawn', 'agent_complete'])
+    } finally { f.close() }
+  })
+})
+
 describe('Claude cumulative API usage', () => {
   const response = (id: string, output = 100, model = 'claude-opus-5-5') => ({
     type: 'assistant', uuid: `entry-${id}-${output}`,
