@@ -368,6 +368,7 @@ async def agent_status_filters(page):
         event.update(time=2+i/10, sessionId='phone-primary', eventId=1000+i, streamId='phone-fixture')
     await page.evaluate("events => window.postMessage({type:'agent-event-batch',events},'*')", events)
     await expect(tree.get_by_role('button', name='Monitor Reviewer', exact=True)).to_have_count(0)
+
     await expect(tree.get_by_role('button', name='Monitor Implementer', exact=True)).to_be_visible()
     await expect(tree.get_by_role('button', name='Monitor Test runner', exact=True)).to_be_visible()
     header = page.get_by_role('region', name='Agent controls')
@@ -398,6 +399,60 @@ async def agent_status_filters(page):
         await page.screenshot(path='/tmp/branchline-agent-status-phone.png')
 
 
+async def cost_history_graph(page):
+    requests = []
+    async def history_route(route):
+        sid = parse_qs(urlparse(route.request.url).query)['sessionId'][0]
+        requests.append(sid)
+        points = [dict(timestamp=1792490400000+i*3600000, costUSD=cost) for i,cost in enumerate([0.25, 0.75, 2.5])]
+        if sid == 'phone-other': points = [dict(timestamp=1792490400000, costUSD=9.5)]
+        await route.fulfill(status=200, content_type='application/json', body=json.dumps(dict(sessionId=sid, history=dict(
+            points=points, untimedCostUSD=0, totalCostUSD=points[-1]['costUSD'], unpricedResponses=0))))
+    await page.route('**/session-cost-history?*', history_route)
+    await page.get_by_role('button', name='$Cost', exact=True).click()
+    panel = page.get_by_role('region', name='Session API costs')
+    chart = panel.get_by_role('img', name='API cost over time', exact=True)
+    await expect(chart).to_be_visible()
+    readout = panel.get_by_label('Cost at selected time', exact=True)
+    await expect(readout).to_contain_text('$2.50')
+    slider = panel.get_by_role('slider', name='Inspect cost history', exact=True)
+    await slider.fill('1')
+    await expect(readout).to_contain_text('$0.75')
+    await slider.press('End')
+    await expect(readout).to_contain_text('$2.50')
+    box = await chart.bounding_box()
+    await chart.click(position=dict(x=box['width']*0.15, y=box['height']*0.5))
+    await expect(readout).to_contain_text('$0.25')
+    assert await slider.evaluate('element => element.getBoundingClientRect().height') >= 44
+    assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    if page.viewport_size['width'] == 390:
+        await page.screenshot(path='/tmp/branchline-cost-history-phone.png')
+    await page.get_by_role('combobox', name='Main session').select_option('phone-other')
+    await expect(readout).to_contain_text('$9.50')
+    await page.get_by_role('button', name='Close API costs', exact=True).click()
+    before = len(requests)
+    await page.wait_for_timeout(5200)
+    assert len(requests) == before, 'Closing the cost view must stop history requests'
+
+
+async def cost_history_retry(page):
+    attempts = []
+    async def history_route(route):
+        attempts.append(route.request.url)
+        if len(attempts) == 1:
+            await route.fulfill(status=503, body='Unavailable')
+        else:
+            await route.fulfill(status=200, content_type='application/json', body=json.dumps(dict(sessionId='phone-primary', history=dict(
+                points=[], untimedCostUSD=2.5, totalCostUSD=2.5, unpricedResponses=0))))
+    await page.route('**/session-cost-history?*', history_route)
+    await page.get_by_role('button', name='$Cost', exact=True).click()
+    panel = page.get_by_role('region', name='Session API costs')
+    await panel.get_by_role('button', name='Retry cost history', exact=True).click()
+    await expect(panel.get_by_text('No dated usage yet.', exact=True)).to_be_visible()
+    await expect(panel).to_contain_text('$2.50 has no recorded timestamp')
+    await expect(panel.get_by_role('img', name='API cost over time', exact=True)).to_have_count(0)
+
+
 async def main():
     url = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:3001"
     requested = set(sys.argv[2].split(',')) if len(sys.argv) > 2 else None
@@ -408,7 +463,7 @@ async def main():
             launch["executable_path"] = os.environ["PLAYWRIGHT_CHROMIUM_EXECUTABLE"]
         browser = await playwright.chromium.launch(**launch)
         for width in [360, 390, 1280]:
-            for check in [tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, agent_status_filters]:
+            for check in [tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, agent_status_filters, cost_history_graph, cost_history_retry]:
                 if requested and check.__name__ not in requested:
                     continue
                 context = await browser.new_context(viewport=dict(width=width, height=844), is_mobile=width < 640, has_touch=width < 640)

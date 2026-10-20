@@ -19,6 +19,8 @@ The original graph view, tool details, transcripts, file activity, and runtime s
 
 The header and `$Cost` panel show cumulative recorded usage for the selected main session and its subagents: uncached input, output, cache reads, and cache writes. The panel separates Claude's one-hour writes. Reasoning is included in output, so it is counted once. Finished agents retain their usage.
 
+Open `$Cost` to see cumulative cost over time, including earlier responses in the session logs. Tap the graph or drag its slider to inspect a date and cost. History refreshes every five seconds while the panel is open. Records without timestamps stay in the total and are identified below the graph.
+
 Costs use standard API list prices, verified on 20 October 2026, with each request's model and applicable prompt-length tier. Sources: [OpenAI pricing](https://developers.openai.com/api/docs/pricing), [Claude pricing](https://platform.claude.com/docs/en/about-claude/pricing). These are API-equivalent token costs; subscriptions, service-tier premiums, and server-side tool fees are outside this estimate. Unknown model rates show as unavailable.
 
 Claude response IDs deduplicate streaming blocks and transcript replays. Codex response usage records include compaction requests; older rollouts use cumulative token counters. Local transcripts restore usage after a server restart. Context bars continue to show current context fill separately.

@@ -150,6 +150,10 @@ class VSCodeBridge {
     this.postToExtension({ type: 'open-file', filePath, line })
   }
 
+  requestCostHistory(sessionId: string, requestId: number): void {
+    this.postToExtension({ type: 'request-cost-history', sessionId, requestId })
+  }
+
   private postToExtension(message: Record<string, unknown>): void {
     if (this._isVSCode && typeof window !== 'undefined') {
       // When inside VS Code iframe, post to parent (the webview frame)

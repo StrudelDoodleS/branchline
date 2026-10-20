@@ -124,6 +124,7 @@ export interface CodexParserDelegate {
 // ─── Record shapes (structural typing, all fields optional) ────────────────
 
 interface RolloutRecord {
+  timestamp?: string
   type?: string
   payload?: unknown
 }
@@ -285,10 +286,10 @@ export class CodexRolloutParser {
       case 'response_item':
         return this.handleResponseItem(record.payload, state)
       case 'event_msg':
-        return this.handleEventMsg(record.payload, state)
+        return this.handleEventMsg(record.payload, state, Date.parse(record.timestamp ?? ''))
       case 'token_usage_record':
         if (isRecord(record.payload)) {
-          state.usage.recordResponse(record.payload, state.model ?? '')
+          state.usage.recordResponse(record.payload, state.model ?? '', Date.parse(record.timestamp ?? ''))
           this.emitContextUpdate(state)
         }
         return
@@ -518,13 +519,13 @@ export class CodexRolloutParser {
 
   // ─── event_msg ───────────────────────────────────────────────────────────
 
-  private handleEventMsg(payload: unknown, state: CodexRolloutState): void {
+  private handleEventMsg(payload: unknown, state: CodexRolloutState, timestamp?: number): void {
     if (!isRecord(payload)) return
     switch (payload.type) {
       case 'agent_reasoning':
         return this.handleAgentReasoning(payload, state)
       case 'token_count':
-        return this.handleTokenCount(payload, state)
+        return this.handleTokenCount(payload, state, timestamp)
       // Other event_msg types are either mirrors of response_item content
       // (agent_message, user_message, exec_command_end, patch_apply_end) or
       // metadata we don't currently surface (task_started, task_complete,
@@ -541,10 +542,10 @@ export class CodexRolloutParser {
    *  - `total_token_usage.input_tokens` = cumulative across the session — used
    *    for billing, not context fill.
    *  - `model_context_window` = authoritative tokensMax for this model. */
-  private handleTokenCount(payload: Record<string, unknown>, state: CodexRolloutState): void {
+  private handleTokenCount(payload: Record<string, unknown>, state: CodexRolloutState, timestamp?: number): void {
     const info = payload.info
     if (!isRecord(info)) return
-    state.usage.record(info, state.model ?? '')
+    state.usage.record(info, state.model ?? '', timestamp)
 
     if (typeof info.model_context_window === 'number' && info.model_context_window > 0) {
       state.reportedContextWindow = info.model_context_window

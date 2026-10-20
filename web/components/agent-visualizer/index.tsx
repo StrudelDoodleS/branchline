@@ -439,7 +439,7 @@ export function AgentVisualizer() {
       />
 
       {/* Timeline panel (slide-in from bottom) */}
-      <UsagePanel visible={showCostOverlay} agents={agents} onClose={() => setShowCostOverlay(false)} />
+      <UsagePanel visible={showCostOverlay} agents={agents} sessionId={bridge.selectedSessionId} onClose={() => setShowCostOverlay(false)} />
 
       <TimelinePanel
         visible={showTimeline}

@@ -39,6 +39,9 @@ async function main() {
     if (req.method === 'GET' && req.url?.startsWith('/session-events?')) {
       return relay.handleSessionReplay(req, res)
     }
+    if (req.method === 'GET' && req.url?.startsWith('/session-cost-history?')) {
+      return relay.handleCostHistory(req, res)
+    }
 
     res.writeHead(200, { 'Content-Type': 'text/plain' })
     res.end('Branchline Dev Relay')

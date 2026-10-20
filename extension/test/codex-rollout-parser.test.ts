@@ -39,6 +39,19 @@ function runFixture() {
 }
 
 describe('Codex cumulative API usage', () => {
+  it('keeps original usage dates for both response records and legacy counters', () => {
+    for (const authoritative of [true, false]) {
+      const parser = new CodexRolloutParser({ emit: () => {}, elapsed: () => 999999 })
+      const state = createCodexRolloutState()
+      parser.processLine(JSON.stringify({ type: 'turn_context', payload: { model: 'gpt-6.1-sol' } }), state)
+      const usage = { input_tokens: 10000, cached_input_tokens: 8000, output_tokens: 1000 }
+      const record = authoritative
+        ? { type: 'token_usage_record', payload: { response_id: 'dated', usage, thread_token_usage: usage } }
+        : { type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: usage, last_token_usage: usage } } }
+      parser.processLine(JSON.stringify({ ...record, timestamp: '2026-10-18T10:00:00Z' }), state)
+      assert.deepEqual([...state.usage.costRecords()], [{ timestamp: Date.parse('2026-10-18T10:00:00Z'), costUSD: 0.0148 }])
+    }
+  })
   function run(records: unknown[]) {
     const events: AgentEvent[] = []
     const parser = new CodexRolloutParser({ emit: event => events.push(event), elapsed: () => 0 })

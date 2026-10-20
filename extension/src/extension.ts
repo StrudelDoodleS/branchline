@@ -167,6 +167,11 @@ function wirePanel(panel: VisualizerPanel): void {
   let readyHandled = false
   panel.onCommand((message: WebviewToExtensionMessage) => {
     switch (message.type) {
+      case 'request-cost-history': {
+        const history = runtimes.map(runtime => runtime.watcher.getCostHistory?.(message.sessionId)).find(value => value !== undefined)
+        panel.postMessage({ type: 'cost-history', sessionId: message.sessionId, requestId: message.requestId, history: history ?? null })
+        break
+      }
       case 'ready':
         if (readyHandled) { return }
         readyHandled = true

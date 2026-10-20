@@ -40,6 +40,7 @@ export interface SessionInfo {
 // ─── Extension → Webview Messages ────────────────────────────────────────────
 
 export type ExtensionToWebviewMessage =
+  | { type: 'cost-history'; sessionId: string; requestId: number; history: import('./token-usage').CostHistory | null }
   | { type: 'connection-status'; status: 'connected' | 'disconnected' | 'watching'; source: string }
   | { type: 'agent-event'; event: AgentEvent }
   | { type: 'agent-event-batch'; events: AgentEvent[] }
@@ -60,6 +61,7 @@ export interface VisualizerConfig {
 // ─── Webview → Extension Messages ────────────────────────────────────────────
 
 export type WebviewToExtensionMessage =
+  | { type: 'request-cost-history'; sessionId: string; requestId: number }
   | { type: 'ready' }
   | { type: 'request-connect' }
   | { type: 'request-disconnect' }

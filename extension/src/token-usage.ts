@@ -14,6 +14,37 @@ export interface UsageTotals extends TokenCounts {
   costUSD: number | null
 }
 
+export interface CostRecord { timestamp?: number; costUSD: number | null }
+export interface CostHistory {
+  points: Array<{ timestamp: number; costUSD: number }>
+  untimedCostUSD: number
+  totalCostUSD: number | null
+  unpricedResponses: number
+}
+
+/** Cumulative dated cost, bounded for display without losing the final total. */
+export function buildCostHistory(records: Iterable<CostRecord>, maxPoints = 240): CostHistory {
+  const dated = new Map<number, number>()
+  let untimedCostUSD = 0, unpricedResponses = 0, total = 0
+  for (const record of records) {
+    if (record.costUSD === null || !Number.isFinite(record.costUSD) || record.costUSD < 0) {
+      unpricedResponses++
+      continue
+    }
+    total += record.costUSD
+    if (record.timestamp === undefined || !Number.isFinite(record.timestamp) || record.timestamp < 0) {
+      untimedCostUSD += record.costUSD
+    } else {
+      dated.set(record.timestamp, (dated.get(record.timestamp) ?? 0) + record.costUSD)
+    }
+  }
+  let cumulative = 0
+  const all = [...dated].sort(([a], [b]) => a - b).map(([timestamp, cost]) => ({ timestamp, costUSD: cumulative += cost }))
+  const limit = Math.max(2, Math.floor(maxPoints))
+  const points = all.length <= limit ? all : Array.from({ length: limit }, (_, i) => all[Math.round(i * (all.length - 1) / (limit - 1))])
+  return { points, untimedCostUSD, totalCostUSD: unpricedResponses ? null : total, unpricedResponses }
+}
+
 type Rates = { input: number; output: number; read: number; write: number; write1h?: number; longAfter?: number; longInput?: number; longOutput?: number }
 
 /** Standard API USD / million tokens, verified 2026-10-20.
@@ -101,13 +132,17 @@ export function apiCost(model: string, tokens: TokenCounts, requestInput = token
 /** Replace response snapshots rather than adding every streamed content block.
  * Response IDs are session-wide, so inline progress and subagent files dedup. */
 export class UsageLedger {
-  private responses = new Map<string, { agent: string; model: string; tokens: TokenCounts; cost: number | null }>()
+  private responses = new Map<string, { agent: string; model: string; tokens: TokenCounts; cost: number | null; timestamp?: number }>()
   private agents = new Map<string, { tokens: TokenCounts; cost: number; unpriced: number }>()
 
-  record(id: string, agent: string, model: string, tokens: TokenCounts, requestInput?: number): string | undefined {
+  record(id: string, agent: string, model: string, tokens: TokenCounts, requestInput?: number, timestamp?: number): string | undefined {
     const old = this.responses.get(id)
+    const at = timestamp !== undefined && Number.isFinite(timestamp) && timestamp >= 0 ? timestamp : undefined
     model ||= old?.model ?? ''
-    if (old && (tokens.outputTokens < old.tokens.outputTokens || (model === old.model && KEYS.every(key => tokens[key] === old.tokens[key])))) return
+    if (old && (tokens.outputTokens < old.tokens.outputTokens || (model === old.model && KEYS.every(key => tokens[key] === old.tokens[key])))) {
+      if (old.timestamp === undefined && at !== undefined) { old.timestamp = at; return old.agent }
+      return
+    }
     const owner = old?.agent ?? agent
     const entry = this.agents.get(owner) ?? { tokens: emptyCounts(), cost: 0, unpriced: 0 }
     const cost = apiCost(model, tokens, requestInput)
@@ -115,8 +150,12 @@ export class UsageLedger {
     entry.cost += (cost ?? 0) - (old?.cost ?? 0)
     entry.unpriced += Number(cost === null) - Number(old?.cost === null)
     this.agents.set(owner, entry)
-    this.responses.set(id, { agent: owner, model, tokens: { ...tokens }, cost })
+    this.responses.set(id, { agent: owner, model, tokens: { ...tokens }, cost, timestamp: old?.timestamp ?? at })
     return owner
+  }
+
+  *costRecords(): IterableIterator<CostRecord> {
+    for (const response of this.responses.values()) yield { timestamp: response.timestamp, costUSD: response.cost }
   }
 
   snapshot(agent: string): UsageTotals | undefined {
@@ -134,8 +173,9 @@ export class CodexUsageTracker {
   private beforeLast?: UsageTotals
   private responses?: UsageLedger
   private prefix?: UsageTotals
+  private prefixRecords?: CostRecord[]
 
-  record(info: Record<string, unknown>, model: string): void {
+  record(info: Record<string, unknown>, model: string, timestamp?: number): void {
     if (this.responses) return // legacy token_count mirrors omit compaction calls
     const tokens = normalizeCodexUsage(info.total_token_usage)
     if (!tokens || KEYS.some(key => tokens[key] < this.previous[key])) return
@@ -145,11 +185,11 @@ export class CodexUsageTracker {
     const last = object(info.last_token_usage)
     const requestInput = typeof last.input_tokens === 'number' ? last.input_tokens : delta.inputTokens + delta.cacheReadTokens + delta.cacheWriteTokens
     this.beforeLast = this.ledger.snapshot('orchestrator')
-    this.ledger.record(String(++this.revision), 'orchestrator', model, delta, requestInput)
+    this.ledger.record(String(++this.revision), 'orchestrator', model, delta, requestInput, timestamp)
     this.previous = tokens
   }
 
-  recordResponse(payload: Record<string, unknown>, model: string): void {
+  recordResponse(payload: Record<string, unknown>, model: string, timestamp?: number): void {
     const id = payload.response_id
     const tokens = normalizeCodexUsage(payload.usage)
     if (typeof id !== 'string' || !id || !tokens) return
@@ -160,12 +200,25 @@ export class CodexUsageTracker {
       if (!valid(prior)) return
       // A CLI upgrade can append response records to an older rollout. Retain
       // its already-priced prefix, excluding a legacy mirror of this response.
-      const known = [this.ledger.snapshot('orchestrator'), this.beforeLast].find(snapshot => snapshot &&
+      const snapshots = [this.ledger.snapshot('orchestrator'), this.beforeLast]
+      const knownIndex = snapshots.findIndex(snapshot => snapshot &&
         KEYS.every(key => key === 'reasoningTokens' || snapshot[key] === prior[key]))
+      const known = snapshots[knownIndex]
       this.prefix = { ...prior, totalTokens: total(prior), costUSD: total(prior) === 0 ? 0 : known?.costUSD ?? null }
+      if (knownIndex >= 0) {
+        this.prefixRecords = [...this.ledger.costRecords()]
+        if (knownIndex === 1) this.prefixRecords.pop()
+      } else if (total(prior) === 0) this.prefixRecords = []
       this.responses = new UsageLedger()
     }
-    this.responses.record(id, 'orchestrator', typeof payload.model === 'string' ? payload.model : model, tokens)
+    this.responses.record(id, 'orchestrator', typeof payload.model === 'string' ? payload.model : model, tokens, undefined, timestamp)
+  }
+
+  *costRecords(): IterableIterator<CostRecord> {
+    if (!this.responses) { yield* this.ledger.costRecords(); return }
+    if (this.prefixRecords) yield* this.prefixRecords
+    else if (this.prefix && (this.prefix.totalTokens > 0 || this.prefix.costUSD === null)) yield { costUSD: this.prefix.costUSD }
+    yield* this.responses.costRecords()
   }
 
   snapshot(): UsageTotals | undefined {

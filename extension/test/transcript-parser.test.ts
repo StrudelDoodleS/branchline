@@ -258,6 +258,22 @@ describe('Claude cumulative API usage', () => {
         output_tokens_details: { thinking_tokens: 40 } } },
   })
 
+  it('restores original response dates for cost history instead of attach time', () => {
+    const { session, parser, feed } = setup()
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'branchline-cost-dates-'))
+    const file = path.join(directory, 'session.jsonl')
+    const first = { ...response('dated', 50), timestamp: '2026-10-18T10:00:00Z' }
+    fs.writeFileSync(file, JSON.stringify(first) + '\n')
+    try {
+      parser.prescanExistingContent(file, fs.statSync(file).size, session)
+      feed({ ...response('dated', 100), timestamp: '2026-10-18T10:00:05Z' })
+      const records = [...session.usageLedger!.costRecords()]
+      assert.equal(records.length, 1)
+      assert.equal(records[0].timestamp, Date.parse('2026-10-18T10:00:00Z'))
+      assert.equal(records[0].costUSD, session.usageLedger!.snapshot('orchestrator')!.costUSD)
+    } finally { fs.rmSync(directory, { recursive: true, force: true }) }
+  })
+
   it('counts each response once, updates streamed output, and preserves totals across context changes', () => {
     const { session, feed } = setup()
     feed(response('first', 50))

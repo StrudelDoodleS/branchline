@@ -39,6 +39,9 @@ export async function startServer(options: ServerOptions) {
     if (req.method === 'GET' && req.url?.startsWith('/session-events?')) {
       return relay.handleSessionReplay(req, res)
     }
+    if (req.method === 'GET' && req.url?.startsWith('/session-cost-history?')) {
+      return relay.handleCostHistory(req, res)
+    }
 
     // Static files (UI)
     if (req.method === 'GET') {

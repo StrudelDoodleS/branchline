@@ -5,8 +5,9 @@ import type { Agent } from '@/lib/agent-types'
 import { Z } from '@/lib/agent-types'
 import { sessionUsage, formatApiCost } from '@/lib/usage'
 import { stopPropagationHandlers } from './shared-ui'
+import { CostHistoryChart } from './cost-history-chart'
 
-export function UsagePanel({ visible, agents, onClose }: { visible: boolean; agents: Map<string, Agent>; onClose: () => void }) {
+export function UsagePanel({ visible, agents, sessionId, onClose }: { visible: boolean; agents: Map<string, Agent>; sessionId: string | null; onClose: () => void }) {
   if (!visible) return null
   const usage = sessionUsage(agents.values())
   const fields = usage ? [
@@ -28,6 +29,7 @@ export function UsagePanel({ visible, agents, onClose }: { visible: boolean; age
     </div>
     <div className="mt-1 text-lg" style={{ color: '#86efac' }}>{formatApiCost(usage)}</div>
     <p className="mt-1" style={{ color: '#cbd5e1' }}>Recorded usage · main + subagents</p>
+    <CostHistoryChart key={sessionId ?? 'none'} sessionId={sessionId} />
     <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2">
       {fields.map(([label, value]) => <div key={label} className="min-w-0">
         <dt style={{ color: '#cbd5e1' }}>{label}</dt>

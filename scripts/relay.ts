@@ -25,6 +25,7 @@ import { setLogLevel } from '../extension/src/logger'
 import type { TelemetryClient } from './telemetry'
 import { SessionReplayStore } from './session-replay'
 import { claudeContextPayload } from '../extension/src/claude-context'
+import { buildCostHistory } from '../extension/src/token-usage'
 
 const MAX_EVENT_BUFFER = 5000
 const DISCOVERY_DIR = path.join(os.homedir(), '.claude', 'agent-flow')
@@ -517,6 +518,15 @@ export async function createRelay(options: RelayOptions): Promise<Relay> {
       const replay = sessionId ? eventBuffer.get(sessionId) : undefined
       res.writeHead(replay ? 200 : 404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
       res.end(JSON.stringify(replay ?? { error: 'Session history is unavailable' }))
+    },
+
+    handleCostHistory(req: http.IncomingMessage, res: http.ServerResponse) {
+      const sessionId = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams.get('sessionId')
+      const session = sessionId ? sessions.get(sessionId) : undefined
+      const history = session ? buildCostHistory(session.usageLedger?.costRecords() ?? [])
+        : sessionId ? codexWatcher?.getCostHistory(sessionId) : undefined
+      res.writeHead(history ? 200 : 404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+      res.end(JSON.stringify(history ? { sessionId, history } : { error: 'Cost history is unavailable' }))
     },
 
     dispose() {
