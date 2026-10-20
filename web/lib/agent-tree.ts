@@ -1,14 +1,16 @@
 // Branchline fork modifications; see FORK.md.
 import type { Agent } from './agent-types'
 
-type HierarchyAgent = Pick<Agent, 'id' | 'name' | 'parentId' | 'isMain'>
+type HierarchyAgent = Pick<Agent, 'id' | 'name' | 'parentId' | 'isMain'> & Partial<Pick<Agent, 'state'>>
+
+export type AgentStatusFilter = 'active' | 'done' | 'all'
 
 export interface AgentTreeNode<T extends HierarchyAgent = Agent> {
   agent: T
   children: AgentTreeNode<T>[]
 }
 
-export function buildAgentTree<T extends HierarchyAgent>(agents: Map<string, T>): AgentTreeNode<T>[] {
+export function buildAgentTree<T extends HierarchyAgent>(agents: Map<string, T>, filter: AgentStatusFilter = 'all'): AgentTreeNode<T>[] {
   const ordered = Array.from(agents.values()).sort((a, b) =>
     Number(b.isMain) - Number(a.isMain) || a.name.localeCompare(b.name),
   )
@@ -38,5 +40,11 @@ export function buildAgentTree<T extends HierarchyAgent>(agents: Map<string, T>)
   for (const agent of ordered) {
     if (!visited.has(agent.id)) tree.push(visit(agent))
   }
-  return tree
+  if (filter === 'all') return tree
+  const prune = (nodes: AgentTreeNode<T>[]): AgentTreeNode<T>[] => nodes.flatMap(node => {
+    const descendants = prune(node.children)
+    const matches = filter === 'done' ? node.agent.state === 'complete' : node.agent.state !== 'complete'
+    return node.agent.isMain || matches || descendants.length > 0 ? [{ agent: node.agent, children: descendants }] : []
+  })
+  return prune(tree)
 }

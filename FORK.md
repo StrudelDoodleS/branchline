@@ -11,7 +11,7 @@ Branchline is maintained by StrudelDoodleS and derives from Agent Flow by Simon 
 
 ## Changes carried by this fork
 
-- Main-session selection and a file tree for agents and nested subagents.
+- Main-session selection and a file tree for agents and nested subagents, with remembered Active/Done/All status filters.
 - Portrait layouts, stronger control contrast, keyboard-safe buttons, and reading-position preservation in activity logs.
 - Codex thread ancestry and lifecycle aggregation: a working descendant keeps its main session active, and resuming it restores completed ancestors.
 - Bounded replay history with retained agent identities, per-session snapshots, sequence waterlines, stream-aware live-event buffering, and explicit reset handling.

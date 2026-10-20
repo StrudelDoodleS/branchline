@@ -24,3 +24,41 @@ test('shows agents with missing parents and breaks cycles without dropping agent
   assert.equal(tree[0].agent.id, 'Main')
   assert.deepEqual(buildAgentTree(new Map()), [])
 })
+
+const statusAgents = () => new Map([
+  { ...agent('Main', null, true), state: 'thinking' as const },
+  { ...agent('Done parent', 'Main'), state: 'complete' as const },
+  { ...agent('Working grandchild', 'Done parent'), state: 'tool_calling' as const },
+  { ...agent('Finished leaf', 'Main'), state: 'complete' as const },
+  { ...agent('Working parent', 'Main'), state: 'thinking' as const },
+  { ...agent('Finished grandchild', 'Working parent'), state: 'complete' as const },
+  { ...agent('Approval', 'Main'), state: 'waiting_permission' as const },
+  { ...agent('Paused', 'Main'), state: 'paused' as const },
+  { ...agent('Error', 'Main'), state: 'error' as const },
+].map(item => [item.id, item]))
+
+test('active filter removes finished branches but preserves ancestry and agents needing attention', () => {
+  const agents = statusAgents()
+  const tree = buildAgentTree(agents, 'active')
+  assert.deepEqual(tree.map(node => node.agent.id), ['Main'])
+  assert.deepEqual(tree[0].children.map(node => node.agent.id), ['Approval', 'Done parent', 'Error', 'Paused', 'Working parent'])
+  assert.deepEqual(tree[0].children[1].children.map(node => node.agent.id), ['Working grandchild'])
+  assert.deepEqual(tree[0].children[4].children, [])
+  assert.equal(agents.size, 9) // filtering must not delete session/accounting data
+})
+
+test('done filter keeps completed descendants under their working parent', () => {
+  const tree = buildAgentTree(statusAgents(), 'done')
+  assert.deepEqual(tree[0].children.map(node => node.agent.id), ['Done parent', 'Finished leaf', 'Working parent'])
+  assert.deepEqual(tree[0].children[0].children, [])
+  assert.deepEqual(tree[0].children[2].children.map(node => node.agent.id), ['Finished grandchild'])
+})
+
+test('a filter with no matching subagents retains the main-session anchor', () => {
+  const agents = new Map([{ ...agent('Main', null, true), state: 'complete' as const },
+    { ...agent('Finished', 'Main'), state: 'complete' as const }].map(item => [item.id, item]))
+  const tree = buildAgentTree(agents, 'active')
+  assert.deepEqual(tree.map(node => node.agent.id), ['Main'])
+  assert.deepEqual(tree[0].children, [])
+  assert.equal(buildAgentTree(agents, 'all')[0].children.length, 1)
+})

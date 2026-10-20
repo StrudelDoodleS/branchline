@@ -347,6 +347,57 @@ async def reported_usage_costs(page):
     await expect(panel).to_have_count(0)
 
 
+async def agent_status_filters(page):
+    tree = page.get_by_role('navigation', name='Session agent tree')
+    filters = page.get_by_role('group', name='Agent status filter')
+    active = filters.get_by_role('button', name='Show active agents', exact=True)
+    done = filters.get_by_role('button', name='Show done agents', exact=True)
+    all_agents = filters.get_by_role('button', name='Show all agents', exact=True)
+    await expect(active).to_have_attribute('aria-pressed', 'true')
+    usage = dict(inputTokens=100, outputTokens=100, cacheReadTokens=1000, cacheWriteTokens=0,
+                 cacheWrite1hTokens=0, reasoningTokens=0, totalTokens=1200, costUSD=1.25)
+    empty_usage = dict(usage, inputTokens=0, outputTokens=0, cacheReadTokens=0, totalTokens=0, costUSD=0)
+    events = [
+        dict(type='context_update', payload=dict(agent='Reviewer', tokens=100, usage=usage)),
+        dict(type='context_update', payload=dict(agent='Implementer', tokens=100, usage=empty_usage)),
+        dict(type='agent_complete', payload=dict(name='Reviewer')),
+        dict(type='agent_complete', payload=dict(name='Implementer')),
+        dict(type='agent_spawn', payload=dict(name='Test runner')),
+    ]
+    for i,event in enumerate(events):
+        event.update(time=2+i/10, sessionId='phone-primary', eventId=1000+i, streamId='phone-fixture')
+    await page.evaluate("events => window.postMessage({type:'agent-event-batch',events},'*')", events)
+    await expect(tree.get_by_role('button', name='Monitor Reviewer', exact=True)).to_have_count(0)
+    await expect(tree.get_by_role('button', name='Monitor Implementer', exact=True)).to_be_visible()
+    await expect(tree.get_by_role('button', name='Monitor Test runner', exact=True)).to_be_visible()
+    header = page.get_by_role('region', name='Agent controls')
+    await expect(header).to_contain_text('~$1.25 API')
+    await done.click()
+    await expect(tree.get_by_role('button', name='Monitor Reviewer', exact=True)).to_be_visible()
+    await expect(tree.get_by_role('button', name='Monitor Test runner', exact=True)).to_have_count(0)
+    await tree.get_by_role('button', name='Monitor Reviewer', exact=True).click()
+    await expect(page.get_by_role('region', name='Agent activity')).to_be_visible()
+    await active.click()
+    await expect(page.get_by_role('region', name='Agent activity')).to_have_count(0)
+    await all_agents.click()
+    await expect(tree.get_by_role('button', name='Monitor Reviewer', exact=True)).to_be_visible()
+    await expect(tree.get_by_role('button', name='Monitor Test runner', exact=True)).to_be_visible()
+    await expect(header).to_contain_text('~$1.25 API')
+    for button in [active, done, all_agents]:
+        box = await button.bounding_box()
+        assert box['height'] >= 44
+        assert box['x'] >= 0 and box['x'] + box['width'] <= page.viewport_size['width']
+    await done.click()
+    await page.reload(wait_until='domcontentloaded')
+    await expect(done).to_have_attribute('aria-pressed', 'true')
+    await expect(page.get_by_text('No done subagents.', exact=True)).to_be_visible()
+    await expect(tree.get_by_role('button', name='Monitor main session', exact=True)).to_be_visible()
+    await active.click()
+    await expect(tree.get_by_role('button', name='Monitor Reviewer', exact=True)).to_be_visible()
+    if page.viewport_size['width'] == 390:
+        await page.screenshot(path='/tmp/branchline-agent-status-phone.png')
+
+
 async def main():
     url = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:3001"
     requested = set(sys.argv[2].split(',')) if len(sys.argv) > 2 else None
@@ -357,7 +408,7 @@ async def main():
             launch["executable_path"] = os.environ["PLAYWRIGHT_CHROMIUM_EXECUTABLE"]
         browser = await playwright.chromium.launch(**launch)
         for width in [360, 390, 1280]:
-            for check in [tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs]:
+            for check in [tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, agent_status_filters]:
                 if requested and check.__name__ not in requested:
                     continue
                 context = await browser.new_context(viewport=dict(width=width, height=844), is_mobile=width < 640, has_touch=width < 640)

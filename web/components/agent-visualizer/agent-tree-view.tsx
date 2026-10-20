@@ -1,9 +1,9 @@
 // Branchline fork modifications; see FORK.md.
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { Agent, AgentState } from '@/lib/agent-types'
-import { buildAgentTree, type AgentTreeNode } from '@/lib/agent-tree'
+import { buildAgentTree, type AgentTreeNode, type AgentStatusFilter } from '@/lib/agent-tree'
 import { getStateColor } from '@/lib/colors'
 import { formatTokens } from '@/lib/utils'
 import type { ConversationMessage } from '@/hooks/simulation/types'
@@ -17,6 +17,8 @@ const STATE_LABELS: Record<AgentState, string> = {
 
 const buttonClass = 'min-h-11 min-w-11 rounded-md border border-slate-500 px-2 text-xs focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300'
 const TREE_INDENT = 18
+const STATUS_FILTER_KEY = 'branchline-agent-status-filter'
+const FILTER_LABELS = { active: 'Active', done: 'Done', all: 'All' } as const
 
 const SHORT_STATE_LABELS: Record<AgentState, string> = {
   idle: 'idle', thinking: 'working', tool_calling: 'tools',
@@ -35,9 +37,36 @@ interface AgentTreeViewProps {
 }
 
 export function AgentTreeView({ agents, selectedAgentId, sessionLabel, conversation, onSelectAgent, loading, error, onRetry }: AgentTreeViewProps) {
-  const tree = useMemo(() => buildAgentTree(agents), [agents])
+  const [statusFilter, setStatusFilter] = useState<AgentStatusFilter>('active')
+  const tree = useMemo(() => buildAgentTree(agents, statusFilter), [agents, statusFilter])
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set())
   const selectedAgent = selectedAgentId ? agents.get(selectedAgentId) : undefined
+  const counts = useMemo(() => {
+    const result = { active: 0, done: 0, all: 0 }
+    for (const agent of agents.values()) {
+      if (agent.isMain) continue
+      result.all++
+      result[agent.state === 'complete' ? 'done' : 'active']++
+    }
+    return result
+  }, [agents])
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(STATUS_FILTER_KEY)
+      if (saved === 'active' || saved === 'done' || saved === 'all') setStatusFilter(saved)
+    } catch { /* Keep the active default when browser storage is unavailable. */ }
+  }, [])
+
+  function changeFilter(filter: AgentStatusFilter) {
+    setStatusFilter(filter)
+    setCollapsed(new Set())
+    try { localStorage.setItem(STATUS_FILTER_KEY, filter) } catch { /* Optional preference storage. */ }
+    const containsSelection = (nodes: AgentTreeNode[]): boolean => nodes.some(node =>
+      node.agent.id === selectedAgentId || containsSelection(node.children),
+    )
+    if (selectedAgentId && !containsSelection(buildAgentTree(agents, filter))) onSelectAgent(null)
+  }
 
   function renderBranch(node: AgentTreeNode, isLast: boolean, isRoot: boolean, ancestorsContinue: boolean[] = []) {
     const { agent, children } = node
@@ -119,6 +148,18 @@ export function AgentTreeView({ agents, selectedAgentId, sessionLabel, conversat
         <h1 className="text-sm font-semibold">Session tree</h1>
         {selectedAgent && <button type="button" className={`${buttonClass} bg-slate-800`} onClick={() => onSelectAgent(null)}>All agents</button>}
       </div>
+      <div role="group" aria-label="Agent status filter" className="flex shrink-0 flex-wrap items-center gap-2">
+        <span className="text-xs text-slate-300">Subagents</span>
+        {(['active', 'done', 'all'] as const).map(filter => <button
+          key={filter}
+          type="button"
+          aria-label={`Show ${filter} agents`}
+          aria-pressed={statusFilter === filter}
+          title="Parent rows are kept to show the hierarchy."
+          className={`${buttonClass} ${statusFilter === filter ? 'border-cyan-400 bg-cyan-950 text-cyan-100' : 'bg-slate-800 text-slate-200'}`}
+          onClick={() => changeFilter(filter)}
+        >{FILTER_LABELS[filter]} <span className="text-slate-300">{counts[filter]}</span></button>)}
+      </div>
       {loading && <p role="status" className="text-xs text-slate-300">Loading recent activity…</p>}
       {error && <div role="alert" className="flex items-center justify-between gap-2 text-xs text-amber-200">
         <p>{error}</p>
@@ -129,6 +170,9 @@ export function AgentTreeView({ agents, selectedAgentId, sessionLabel, conversat
           {tree.length > 0 ? (
             <ul>{tree.map((node, index) => renderBranch(node, index === tree.length - 1, true))}</ul>
           ) : <p className="py-4 text-xs text-slate-300">Waiting for agents in this session.</p>}
+          {agents.size > 0 && counts[statusFilter] === 0 && <p className="py-3 text-xs text-slate-300">
+            {statusFilter === 'all' ? 'No subagents in this session.' : `No ${statusFilter} subagents.`}
+          </p>}
         </nav>
         {selectedAgent && <AgentActivity key={selectedAgent.id} agent={selectedAgent} conversation={conversation} onClose={() => onSelectAgent(null)} />}
       </div>
