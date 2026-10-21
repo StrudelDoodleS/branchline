@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 import { useState, useCallback, useRef, useEffect, type MutableRefObject } from 'react'
 import { Agent, ToolCallNode, Discovery, ANIM } from '@/lib/agent-types'
 import { CAMERA } from '@/lib/canvas-constants'
@@ -51,6 +52,14 @@ export function useCanvasInteraction({
   // Floaty agent drag
   const dragLerpRef = useRef<{ targetX: number; targetY: number; agentId: string } | null>(null)
 
+  // Pointer capture keeps drags active when a finger or mouse leaves the canvas.
+  const pointersRef = useRef(new Map<number, { x: number; y: number }>())
+  const dragOriginRef = useRef({ x: 0, y: 0 })
+  const hasDraggedRef = useRef(false)
+  const pinchRef = useRef<{
+    distance: number; center: { x: number; y: number }; transform: Transform
+  } | null>(null)
+
   // Pan tracking
   const lastPanPosRef = useRef({ x: 0, y: 0, time: 0 })
   const lastHoveredIdRef = useRef<string | null>(null)
@@ -81,6 +90,9 @@ export function useCanvasInteraction({
     if (e.button === 0) {
       panVelocityRef.current = { vx: 0, vy: 0, active: false }
       setIsDragging(true)
+      isDraggingRef.current = true
+      dragOriginRef.current = { x: e.clientX, y: e.clientY }
+      hasDraggedRef.current = false
       if (agentId) {
         dragTargetRef.current = { type: 'agent', id: agentId, startX: e.clientX, startY: e.clientY }
       } else {
@@ -100,6 +112,9 @@ export function useCanvasInteraction({
     const dragging = isDraggingRef.current
     const dragTarget = dragTargetRef.current
     if (dragging && dragTarget) {
+      if (Math.hypot(e.clientX - dragOriginRef.current.x, e.clientY - dragOriginRef.current.y) > ANIM.dragThresholdPx) {
+        hasDraggedRef.current = true
+      }
       if (dragTarget.type === 'canvas') {
         userHasNavigatedRef.current = true
         const dx = e.clientX - dragTarget.startX
@@ -137,10 +152,7 @@ export function useCanvasInteraction({
         panVelocityRef.current.active = true
       }
     }
-    const screenDist = dt_
-      ? Math.abs(e.clientX - dt_.startX) + Math.abs(e.clientY - dt_.startY)
-      : 0
-    if (screenDist < ANIM.dragThresholdPx) {
+    if (!hasDraggedRef.current) {
       const pos = screenToCanvas(e.clientX, e.clientY)
       const agentId = findAgentAt(pos.x, pos.y)
       const p = drawPropsRef.current
@@ -172,8 +184,87 @@ export function useCanvasInteraction({
       dragLerpRef.current = null
     }
     setIsDragging(false)
+    isDraggingRef.current = false
     dragTargetRef.current = null
   }, [screenToCanvas, findAgentAt, findBubbleAgentAt, findToolCallAt, findDiscoveryAt, drawPropsRef, panVelocityRef])
+
+  const handlePointerDown = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (e.button !== 0 || pointersRef.current.size >= 2) return
+    pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
+    e.currentTarget.setPointerCapture(e.pointerId)
+    if (pointersRef.current.size === 1) {
+      handleMouseDown(e)
+      return
+    }
+    const [a, b] = [...pointersRef.current.values()]
+    const rect = e.currentTarget.getBoundingClientRect()
+    pinchRef.current = {
+      distance: Math.max(1, Math.hypot(b.x - a.x, b.y - a.y)),
+      center: { x: (a.x + b.x) / 2 - rect.left, y: (a.y + b.y) / 2 - rect.top },
+      transform: { ...transformRef.current },
+    }
+    hasDraggedRef.current = true
+    dragTargetRef.current = null
+    dragLerpRef.current = null
+    panVelocityRef.current = { vx: 0, vy: 0, active: false }
+    userHasNavigatedRef.current = true
+  }, [handleMouseDown, transformRef, panVelocityRef, userHasNavigatedRef])
+
+  const handlePointerMove = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!pointersRef.current.has(e.pointerId)) {
+      if (e.pointerType !== 'touch') handleMouseMove(e)
+      return
+    }
+    pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
+    const pinch = pinchRef.current
+    if (!pinch) {
+      handleMouseMove(e)
+      return
+    }
+    const [a, b] = [...pointersRef.current.values()]
+    if (!a || !b) return
+    const rect = e.currentTarget.getBoundingClientRect()
+    const center = { x: (a.x + b.x) / 2 - rect.left, y: (a.y + b.y) / 2 - rect.top }
+    const prev = pinch.transform
+    const scale = Math.max(CAMERA.minZoom, Math.min(CAMERA.maxZoom,
+      prev.scale * Math.hypot(b.x - a.x, b.y - a.y) / pinch.distance))
+    transformRef.current = {
+      scale,
+      x: center.x - (pinch.center.x - prev.x) * scale / prev.scale,
+      y: center.y - (pinch.center.y - prev.y) * scale / prev.scale,
+    }
+  }, [handleMouseMove, transformRef])
+
+  const handlePointerUp = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!pointersRef.current.has(e.pointerId)) return
+    pointersRef.current.delete(e.pointerId)
+    if (pinchRef.current) {
+      pinchRef.current = null
+      const remaining = [...pointersRef.current.values()][0]
+      if (remaining) {
+        // Continue panning with the remaining finger without selecting a node.
+        dragTargetRef.current = { type: 'canvas', startX: remaining.x, startY: remaining.y }
+        lastPanPosRef.current = { ...remaining, time: performance.now() }
+      } else {
+        setIsDragging(false)
+        isDraggingRef.current = false
+      }
+    } else {
+      handleMouseUp(e)
+    }
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId)
+  }, [handleMouseUp])
+
+  const handlePointerCancel = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!pointersRef.current.has(e.pointerId)) return
+    pointersRef.current.clear()
+    pinchRef.current = null
+    dragTargetRef.current = null
+    dragLerpRef.current = null
+    setIsDragging(false)
+    isDraggingRef.current = false
+    panVelocityRef.current = { vx: 0, vy: 0, active: false }
+  }, [panVelocityRef])
 
   // Wheel handler attached as native event (passive: false) to allow preventDefault
   const handleWheelRef = useRef<(e: WheelEvent) => void>(() => {})
@@ -241,12 +332,14 @@ export function useCanvasInteraction({
     isDragging,
     dragLerpRef,
     handlers: {
-      onMouseDown: handleMouseDown,
-      onMouseMove: handleMouseMove,
-      onMouseUp: handleMouseUp,
+      onPointerDown: handlePointerDown,
+      onPointerMove: handlePointerMove,
+      onPointerUp: handlePointerUp,
+      onPointerCancel: handlePointerCancel,
+      onLostPointerCapture: handlePointerCancel,
       onDoubleClick: handleDoubleClick,
       onContextMenu: handleContextMenuEvent,
-      onMouseLeave: handleMouseLeave,
+      onPointerLeave: () => { if (pointersRef.current.size === 0) handleMouseLeave() },
     },
     updateDragLerp,
   }

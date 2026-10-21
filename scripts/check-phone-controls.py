@@ -540,6 +540,26 @@ async def reported_usage_costs(page):
     await expect(panel).to_have_count(0)
 
 
+async def main_reply_preserves_subagents(page):
+    tree=page.get_by_role('navigation',name='Session agent tree',exact=True)
+    events=[dict(type='agent_complete',payload=dict(name='Test runner')),
+            dict(type='tool_call_start',payload=dict(agent='Reviewer',tool='Bash',args='long calculation')),
+            dict(type='tool_call_start',payload=dict(agent='Implementer',tool='Bash',args='long build')),
+            dict(type='agent_complete',payload=dict(name='Orchestrator'))]
+    for i,event in enumerate(events):
+        event.update(time=2+i/10,sessionId='phone-primary',eventId=1000+i,streamId='phone-fixture')
+    await page.evaluate("events=>window.postMessage({type:'agent-event-batch',events},'*')",events)
+    await expect(page.get_by_role('button',name='Show active agents',exact=True)).to_contain_text('Active 2')
+    for name in ['Reviewer','Implementer']:
+        await expect(tree.get_by_role('button',name=f'Monitor {name}',exact=True)).to_be_visible()
+        await expect(tree.get_by_role('button',name=f'Monitor {name}',exact=True)).to_contain_text('Using tools')
+    await page.evaluate("event=>window.postMessage({type:'agent-event',event},'*')",dict(type='agent_complete',payload=dict(name='Reviewer'),time=3,sessionId='phone-primary',eventId=1010,streamId='phone-fixture'))
+    await expect(page.get_by_role('button',name='Show active agents',exact=True)).to_contain_text('Active 1')
+    await expect(tree.get_by_role('button',name='Monitor Implementer',exact=True)).to_be_visible()
+    await page.evaluate("event=>window.postMessage({type:'agent-event',event},'*')",dict(type='agent_complete',payload=dict(name='Orchestrator',sessionEnd=True),time=4,sessionId='phone-primary',eventId=1011,streamId='phone-fixture'))
+    await expect(page.get_by_role('button',name='Show active agents',exact=True)).to_contain_text('Active 0')
+
+
 async def agent_status_filters(page):
     tree = page.get_by_role('navigation', name='Session agent tree')
     filters = page.get_by_role('group', name='Agent status filter')
@@ -1632,7 +1652,7 @@ async def main():
             launch["executable_path"] = os.environ["PLAYWRIGHT_CHROMIUM_EXECUTABLE"]
         browser = await playwright.chromium.launch(**launch)
         for width in [360, 390, 1280]:
-            for check in [session_picker_accordion,session_picker_live_focus,session_history_browser, session_catalog_retry, tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, agent_status_filters, cost_history_graph, cost_history_retry, cost_burn_breakdown, cost_burn_trends, cost_multi_day_comparison, cost_readable_layout, agent_model_settings, cost_model_analytics, cost_cache_reuse, cost_cache_write_unknown, cost_time_views, cost_phone_gestures, cost_history_pending_queries]:
+            for check in [session_picker_accordion,session_picker_live_focus,session_history_browser, session_catalog_retry, tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, main_reply_preserves_subagents, agent_status_filters, cost_history_graph, cost_history_retry, cost_burn_breakdown, cost_burn_trends, cost_multi_day_comparison, cost_readable_layout, agent_model_settings, cost_model_analytics, cost_cache_reuse, cost_cache_write_unknown, cost_time_views, cost_phone_gestures, cost_history_pending_queries]:
                 if requested and check.__name__ not in requested:
                     continue
                 context = await browser.new_context(viewport=dict(width=width, height=844), is_mobile=width < 640, has_touch=width < 640)

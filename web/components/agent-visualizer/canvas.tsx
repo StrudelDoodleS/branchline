@@ -207,9 +207,10 @@ export function AgentCanvas({
       const w = dimensions.width
       const h = dimensions.height
 
-      if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
-        canvas.width = w * dpr
-        canvas.height = h * dpr
+      const pixelWidth = Math.round(w * dpr), pixelHeight = Math.round(h * dpr)
+      if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+        canvas.width = pixelWidth
+        canvas.height = pixelHeight
         ctx.scale(dpr, dpr)
       }
 
@@ -340,13 +341,21 @@ export function AgentCanvas({
   }, [])
 
   return (
-    <div ref={containerRef} className="relative w-full h-full overflow-hidden" style={{ cursor: isDragging ? 'grabbing' : 'grab' }}>
+    <div ref={containerRef} className="absolute inset-x-0 overflow-hidden" style={{ top: 'calc(var(--agent-controls-bottom, 48px) + 40px)', bottom: 88, cursor: isDragging ? 'grabbing' : 'grab' }}>
       <canvas
         ref={mainCanvasRef}
-        style={{ width: dimensions.width, height: dimensions.height }}
+        style={{ width: dimensions.width, height: dimensions.height, touchAction: 'none' }}
         {...handlers}
         className="w-full h-full"
       />
+      <button
+        type="button"
+        aria-label="Fit graph"
+        onClick={doZoomToFit}
+        className="absolute right-3 top-2 h-11 min-w-11 rounded-lg border border-slate-600 bg-slate-900/90 px-3 text-xs text-slate-200"
+      >
+        Fit
+      </button>
     </div>
   )
 }

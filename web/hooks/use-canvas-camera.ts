@@ -51,8 +51,10 @@ export function useCanvasCamera({
     toolCalls: Map<string, ToolCallNode> | null
     discoveries: Discovery[] | null
     selectedAgentId: string | null
+    width: number
+    height: number
     result: Transform | null
-  }>({ agents: null, toolCalls: null, discoveries: null, selectedAgentId: null, result: null })
+  }>({ agents: null, toolCalls: null, discoveries: null, selectedAgentId: null, width: 0, height: 0, result: null })
 
   // Initialize transform centered on first agents
   useEffect(() => {
@@ -87,7 +89,8 @@ export function useCanvasCamera({
     if (cache.agents === agents
       && cache.toolCalls === toolCalls
       && cache.discoveries === discoveries
-      && cache.selectedAgentId === selectedAgentId) {
+      && cache.selectedAgentId === selectedAgentId
+      && cache.width === dimensions.width && cache.height === dimensions.height) {
       return cache.result
     }
 
@@ -142,10 +145,10 @@ export function useCanvasCamera({
       }
     }
     if (minX === Infinity) {
-      fitCacheRef.current = { agents, toolCalls, discoveries, selectedAgentId, result: null }
+      fitCacheRef.current = { agents, toolCalls, discoveries, selectedAgentId, width: dimensions.width, height: dimensions.height, result: null }
       return null
     }
-    const padding = ANIM.viewportPadding
+    const padding = dimensions.width < 640 ? 24 : ANIM.viewportPadding
     const boundsW = maxX - minX + padding * 2
     const boundsH = maxY - minY + padding * 2
     const centerX = (minX + maxX) / 2
@@ -156,12 +159,13 @@ export function useCanvasCamera({
       y: dimensions.height / 2 - centerY * scale,
       scale,
     }
-    fitCacheRef.current = { agents, toolCalls, discoveries, selectedAgentId, result }
+    fitCacheRef.current = { agents, toolCalls, discoveries, selectedAgentId, width: dimensions.width, height: dimensions.height, result }
     return result
   }, [getDescendantIds, drawPropsRef, simTimeRef])
 
   const doZoomToFit = useCallback(() => {
     userHasNavigatedRef.current = false
+    panVelocityRef.current = { vx: 0, vy: 0, active: false }
     const target = computeFitTransform()
     if (target) targetTransformRef.current = target
   }, [computeFitTransform])
@@ -201,6 +205,9 @@ export function useCanvasCamera({
         inertia.active = false
       }
     }
+
+    // Direct navigation must stop any previous auto-fit easing immediately.
+    if (userHasNavigatedRef.current || isDragging || pauseAutoFit) targetTransformRef.current = null
 
     // Auto-fit
     if (!userHasNavigatedRef.current && !isDragging && !pauseAutoFit) {

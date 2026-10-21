@@ -126,35 +126,38 @@ export function handleAgentComplete(
 ): void {
   const name = asString(payload.name)
   const agent = state.agents.get(name)
-  if (agent && agent.state !== 'complete') {
-    state.agents.set(name, { ...agent, state: 'complete', completeTime: currentTime })
+  if (!agent) return
 
-    const entry = state.timelineEntries.get(name)
+  // A Stop ends this agent's reply. Background children have their own
+  // lifecycle and can still be running; only SessionEnd closes the subtree.
+  const agentsToComplete = new Set([name])
+  if (payload.sessionEnd === true) {
+    for (const parentId of agentsToComplete) {
+      for (const child of state.agents.values()) {
+        if (child.parentId === parentId) agentsToComplete.add(child.id)
+      }
+    }
+  }
+
+  let changed = false
+  for (const id of agentsToComplete) {
+    const target = state.agents.get(id)!
+    if (target.state === 'complete') continue
+    changed = true
+    state.agents.set(id, { ...target, state: 'complete', completeTime: currentTime })
+    const entry = state.timelineEntries.get(id)
     if (entry) {
       pushTimelineBlock(entry, currentTime, { type: 'complete', label: 'Done', color: COLORS.complete, endTime: currentTime }, ctx)
       entry.endTime = currentTime
     }
-
-    const agentsToComplete = [name]
-    for (const [childId, childAgent] of state.agents) {
-      if (childAgent.parentId === name && childAgent.state !== 'complete') {
-        state.agents.set(childId, { ...childAgent, state: 'complete', completeTime: currentTime })
-        agentsToComplete.push(childId)
-        const childEntry = state.timelineEntries.get(childId)
-        if (childEntry) {
-          pushTimelineBlock(childEntry, currentTime, { type: 'complete', label: 'Done', color: COLORS.complete, endTime: currentTime }, ctx)
-          childEntry.endTime = currentTime
-        }
-      }
-    }
-
-    for (const [tcId, tc] of state.toolCalls) {
-      if (agentsToComplete.includes(tc.agentId) && tc.state === 'running') {
-        state.toolCalls.set(tcId, { ...tc, state: 'complete', completeTime: currentTime })
-      }
-    }
-    if (!ctx.skipForceSync) setTimeout(() => ctx.syncForceSimulation(state.agents, state.edges), 0)
   }
+  for (const [id, tool] of state.toolCalls) {
+    if (agentsToComplete.has(tool.agentId) && tool.state === 'running') {
+      changed = true
+      state.toolCalls.set(id, { ...tool, state: 'complete', completeTime: currentTime })
+    }
+  }
+  if (changed && !ctx.skipForceSync) setTimeout(() => ctx.syncForceSimulation(state.agents, state.edges), 0)
 }
 
 export function handlePermissionRequested(

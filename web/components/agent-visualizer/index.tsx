@@ -306,8 +306,9 @@ export function AgentVisualizer() {
         </div>
       )}
 
-      {/* Canvas fills everything */}
+      {/* Graph fits between the header and bottom controls. */}
       {viewMode === 'graph' && <AgentCanvas
+        key={`${bridge.selectedSessionId ?? 'empty'}:${bridge.sessionResetVersion}`}
         simulationRef={frameRef}
         selectedAgentId={selection.selectedAgentId}
         hoveredAgentId={selection.hoveredAgentId}
