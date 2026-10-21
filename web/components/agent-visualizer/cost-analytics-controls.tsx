@@ -29,10 +29,21 @@ export function CostAnalyticsControls({ options, history, onChange }: {
       <label className="min-w-0 text-[11px] text-slate-300">
         <span className="mb-1 block">Resolution</span>
         <select aria-label="Cost time resolution" value={options.resolution ?? 'auto'} className={`${control} w-full`}
-          onChange={event => onChange({ ...options, resolution: event.target.value as CostHistoryOptions['resolution'], before: undefined })}>
+          onChange={event => onChange({ ...options, resolution: event.target.value as CostHistoryOptions['resolution'] })}>
           <option value="auto">Auto</option><option value="minute">Minute</option><option value="hour">Hour</option><option value="day">Day</option>
         </select>
       </label>
+    </div>
+    <div role="group" aria-label="Cost time range" className="mt-2 grid grid-cols-3 gap-2">
+      {([
+        ['total', 'Total', 'Show total cost history'],
+        ['1h', 'Last 1h', 'Show last hour cost history'],
+        ['2h', 'Last 2h', 'Show last 2 hours cost history'],
+      ] as const).map(([range, label, aria]) => <button key={range} type="button" aria-label={aria}
+        aria-pressed={(options.range ?? 'total') === range} className={control}
+        style={{ background: (options.range ?? 'total') === range ? '#164e63' : undefined,
+          borderColor: (options.range ?? 'total') === range ? '#67e8f9' : undefined }}
+        onClick={() => onChange({ ...options, range })}>{label}</button>)}
     </div>
     {!!groups.length && <section aria-label="Costs by model" className="mt-3">
       <div className="flex items-center justify-between gap-2">

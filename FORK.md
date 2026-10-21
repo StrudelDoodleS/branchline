@@ -20,7 +20,7 @@ Branchline is maintained by StrudelDoodleS and derives from Agent Flow by Simon 
 - A touch-friendly cumulative cost history graph, using original response dates and loading only while the cost panel is open.
 - Dollar burn rate from raw response charges, with shared input/output/cache overlays, idle intervals, and Claude compaction iteration accounting.
 - Per-agent model and reasoning effort in the phone tree and details, restored from session logs and updated as turn settings change.
-- Per-response analytics grouped by model or model + reasoning, with graph filtering, exact minute/hour/day buckets, matching burn units and bounded history navigation.
+- Per-response analytics grouped by model or model + reasoning, with graph filtering, Total/Last 1h/Last 2h views independent of resolution, matching burn units and bounded chart data.
 - Root, extension, and browser regression coverage for these behaviors.
 - Separate Branchline package identities and branding; telemetry defaults off with no collector configured.
 

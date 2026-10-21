@@ -14,7 +14,8 @@ export interface CostHistoryPoint { timestamp: number; costUSD: number; breakdow
 export interface BurnRatePoint { timestamp: number; costUSDPerMinute: number; breakdownUSDPerMinute: CostBreakdown }
 export type CostResolution = 'auto' | 'minute' | 'hour' | 'day'
 export type CostGrouping = 'model' | 'model-reasoning'
-export interface CostHistoryOptions { resolution?: CostResolution; groupBy?: CostGrouping; group?: string; before?: number }
+export type CostRange = 'total' | '1h' | '2h'
+export interface CostHistoryOptions { resolution?: CostResolution; groupBy?: CostGrouping; group?: string; range?: CostRange }
 export interface CostGroup {
   id: string
   model?: string
@@ -37,7 +38,8 @@ export interface CostHistory {
   groupBy?: CostGrouping
   group?: string
   resolution?: CostResolution
-  window?: { start: number; end: number; latestEnd?: number; startCostUSD: number; startBreakdownUSD: CostBreakdown; previousEnd?: number; nextEnd?: number }
+  range?: CostRange
+  window?: { start: number; end: number; startCostUSD: number; startBreakdownUSD: CostBreakdown }
 }
 
 const PARTS = ['input', 'output', 'cacheRead', 'cacheWrite', 'unattributed'] as const
@@ -56,10 +58,9 @@ const groupId = (record: CostRecord, groupBy: CostGrouping) => JSON.stringify([r
 export function normalizeCostHistoryOptions(raw: Record<string, unknown> = {}): CostHistoryOptions {
   const resolution = raw.resolution === 'minute' || raw.resolution === 'hour' || raw.resolution === 'day' ? raw.resolution : 'auto'
   const groupBy = raw.groupBy === 'model-reasoning' ? 'model-reasoning' : 'model'
-  const before = raw.before !== undefined && raw.before !== null && raw.before !== '' ? Number(raw.before) : NaN
-  return { resolution, groupBy,
-    ...(typeof raw.group === 'string' && raw.group.length <= 1024 && raw.group ? { group: raw.group } : {}),
-    ...(Number.isFinite(before) && before >= 0 ? { before } : {}) }
+  const range = raw.range === '1h' || raw.range === '2h' ? raw.range : 'total'
+  return { resolution, groupBy, range,
+    ...(typeof raw.group === 'string' && raw.group.length <= 1024 && raw.group ? { group: raw.group } : {}) }
 }
 
 function summarize(records: CostRecord[], groupBy: CostGrouping, durationMs: number): CostGroup[] {
@@ -86,8 +87,8 @@ function summarize(records: CostRecord[], groupBy: CostGrouping, durationMs: num
   })).sort((a, b) => b.knownCostUSD - a.knownCostUSD || a.id.localeCompare(b.id))
 }
 
-/** Raw charges are grouped before graph sampling. Fixed resolutions page through
- * exact intervals; their cumulative baseline retains all earlier charges. */
+/** The time range is independent of resolution. Buckets widen to fit the whole
+ * selected range; recent views retain earlier charges in their cost baseline. */
 export function buildCostHistory(source: Iterable<CostRecord>, maxPoints = 240, now?: number, query: CostHistoryOptions = {}): CostHistory {
   const options = normalizeCostHistoryOptions({ ...query })
   const records = [...source]
@@ -110,51 +111,38 @@ export function buildCostHistory(source: Iterable<CostRecord>, maxPoints = 240, 
   const limit = Math.max(2, Number.isFinite(maxPoints) ? Math.floor(maxPoints) : 240)
   const history: CostHistory = { points: [], burnRate: { bucketMs: 60000, points: [] }, untimedCostUSD,
     totalCostUSD: unpricedResponses ? null : total, unpricedResponses, groups,
-    groupBy: options.groupBy, group: options.group, resolution: options.resolution }
+    groupBy: options.groupBy, group: options.group, resolution: options.resolution, range: options.range }
   if (!Number.isFinite(first)) return history
-  const fixed = options.resolution !== 'auto'
+  const duration = options.range === '1h' ? 3600000 : options.range === '2h' ? 7200000 : undefined
+  const start = duration === undefined ? first : Math.max(0, end - duration)
   let bucketMs = options.resolution === 'day' ? 86400000 : options.resolution === 'hour' ? 3600000 : 60000
-  if (!fixed) {
-    const minutes = Math.max(1, (end - first) / (limit - 1) / 60000)
-    const magnitude = 10 ** Math.floor(Math.log10(minutes))
-    bucketMs = [1, 2, 5, 10].map(n => n * magnitude).find(n => n >= minutes)! * 60000
-  }
-  const firstBucket = Math.floor(first / bucketMs) * bucketMs
-  const windowEnd = fixed ? Math.max(first, Math.min(end, options.before ?? end)) : end
-  const lastBucket = Math.floor(windowEnd / bucketMs) * bucketMs
-  const start = fixed ? Math.max(firstBucket, lastBucket - (limit - 1) * bucketMs) : firstBucket
-  const count = Math.floor((windowEnd - start) / bucketMs) + 1
-  const rate = history.burnRate = { bucketMs, endTimestamp: windowEnd, points: Array.from({ length: count }, (_, index) => ({
-    timestamp: start + index * bucketMs, costUSDPerMinute: 0, breakdownUSDPerMinute: emptyBreakdown(),
+  const minimumWidth = Math.max(1, (end - start) / (limit - 1) / bucketMs)
+  const magnitude = 10 ** Math.floor(Math.log10(minimumWidth))
+  bucketMs *= [1, 2, 5, 10].map(n => n * magnitude).find(n => n >= minimumWidth)!
+  const bucketStart = Math.floor(start / bucketMs) * bucketMs
+  const count = Math.floor((end - bucketStart) / bucketMs) + 1
+  const rate = history.burnRate = { bucketMs, endTimestamp: end, points: Array.from({ length: count }, (_, index) => ({
+    timestamp: bucketStart + index * bucketMs, costUSDPerMinute: 0, breakdownUSDPerMinute: emptyBreakdown(),
   })) }
   let baseline = 0
   const baselineParts = emptyBreakdown()
   const ordered = [...charges].sort(([a], [b]) => a - b)
   for (const [timestamp, entry] of ordered) {
     if (timestamp < start) { baseline += entry.costUSD; add(baselineParts, entry.breakdownUSD) }
-    else if (timestamp <= windowEnd) {
-      const bucket = rate.points[Math.floor((timestamp - start) / bucketMs)]
+    else if (timestamp <= end) {
+      const bucket = rate.points[Math.floor((timestamp - bucketStart) / bucketMs)]
       bucket.costUSDPerMinute += entry.costUSD * 60000 / bucketMs
       add(bucket.breakdownUSDPerMinute, entry.breakdownUSD, 60000 / bucketMs)
     }
   }
-  history.window = { start, end: windowEnd, latestEnd: end, startCostUSD: baseline, startBreakdownUSD: { ...baselineParts },
-    ...(fixed && start > firstBucket ? { previousEnd: start - 1 } : {}),
-    ...(fixed && windowEnd < end ? { nextEnd: Math.min(end, lastBucket + (limit + 1) * bucketMs - 1) } : {}) }
+  history.window = { start, end, startCostUSD: baseline, startBreakdownUSD: { ...baselineParts } }
   let cumulative = baseline
   const cumulativeParts = { ...baselineParts }
-  if (fixed) {
-    history.points = rate.points.map(bucket => {
-      cumulative += bucket.costUSDPerMinute * bucketMs / 60000
-      add(cumulativeParts, bucket.breakdownUSDPerMinute, bucketMs / 60000)
-      return { timestamp: Math.min(windowEnd, bucket.timestamp + bucketMs - 1), costUSD: cumulative, breakdownUSD: { ...cumulativeParts } }
-    })
-  } else {
-    const all = ordered.map(([timestamp, entry]) => {
-      add(cumulativeParts, entry.breakdownUSD)
-      return { timestamp, costUSD: cumulative += entry.costUSD, breakdownUSD: { ...cumulativeParts } }
-    })
-    history.points = all.length <= limit ? all : Array.from({ length: limit }, (_, i) => all[Math.round(i * (all.length - 1) / (limit - 1))])
-  }
+  const all = ordered.filter(([timestamp]) => timestamp >= start && timestamp <= end).map(([timestamp, entry]) => {
+    add(cumulativeParts, entry.breakdownUSD)
+    return { timestamp, costUSD: cumulative += entry.costUSD, breakdownUSD: { ...cumulativeParts } }
+  })
+  if (!all.length && ordered.length) all.push({ timestamp: end, costUSD: baseline, breakdownUSD: { ...baselineParts } })
+  history.points = all.length <= limit ? all : Array.from({ length: limit }, (_, i) => all[Math.round(i * (all.length - 1) / (limit - 1))])
   return history
 }

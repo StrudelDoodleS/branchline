@@ -556,14 +556,10 @@ async def cost_model_analytics(page):
         total = next((g['costUSD'] for g in groups if g['id'] == selected), 9)
         resolution = query.get('resolution', ['auto'])[0]
         ms = dict(minute=60000, hour=3600000, day=86400000).get(resolution, 60000)
-        before = query.get('before', [None])[0]
         dated = [dict(timestamp=start, costUSD=total/2), dict(timestamp=start+ms, costUSD=total)]
         rates = [dict(timestamp=start+i*ms, costUSDPerMinute=total/2*60000/ms,
                       breakdownUSDPerMinute=dict(input=total/2*60000/ms, output=0, cacheRead=0, cacheWrite=0, unattributed=0)) for i in range(2)]
         window = dict(start=start, end=start+2*ms-1, latestEnd=start+2*ms-1, startCostUSD=0, startBreakdownUSD=dict(input=0, output=0, cacheRead=0, cacheWrite=0, unattributed=0))
-        if resolution != 'auto':
-            if before: window['nextEnd'] = start+2*ms-1
-            else: window['previousEnd'] = start-1
         history = dict(points=dated, groups=groups, group=selected, groupBy='model-reasoning' if detailed else 'model', resolution=resolution,
                        burnRate=dict(bucketMs=ms, endTimestamp=window['end'], points=rates), window=window,
                        untimedCostUSD=0, totalCostUSD=total, unpricedResponses=0)
@@ -587,16 +583,13 @@ async def cost_model_analytics(page):
     await expect(panel.get_by_role('table', name='Cost and burn rate by source')).to_contain_text('$/hr')
     await resolution.select_option('day')
     await expect(panel.get_by_label('Burn rate at selected time', exact=True)).to_contain_text('$2.00/day')
-    await panel.get_by_role('button', name='Earlier cost history', exact=True).click()
-    await expect(panel.get_by_role('button', name='Later cost history', exact=True)).to_be_enabled()
-    assert any('before' in query for query in requests)
-    await panel.get_by_role('button', name='Later cost history', exact=True).click()
-    await expect(panel.get_by_role('button', name='Latest cost history', exact=True)).to_be_disabled()
-    assert requests[-1].get('before') is None
-    await panel.get_by_role('button', name='Earlier cost history', exact=True).click()
-    await expect(panel.get_by_role('button', name='Latest cost history', exact=True)).to_be_enabled()
-    await panel.get_by_role('button', name='Latest cost history', exact=True).click()
-    await expect(panel.get_by_role('button', name='Later cost history', exact=True)).to_be_disabled()
+    total_view = panel.get_by_role('button', name='Show total cost history', exact=True)
+    recent_view = panel.get_by_role('button', name='Show last 2 hours cost history', exact=True)
+    await expect(total_view).to_have_attribute('aria-pressed', 'true')
+    await recent_view.click()
+    await expect(recent_view).to_have_attribute('aria-pressed', 'true')
+    await expect(panel.get_by_label('Burn rate at selected time', exact=True)).to_contain_text('$2.00/day')
+    assert requests[-1]['range'] == ['2h']
     await panel.get_by_role('button', name='Show costs for all models', exact=True).click()
     await expect(panel.get_by_label('Cost at selected time', exact=True)).to_contain_text('$9.00')
     assert requests[-1].get('group') is None
@@ -604,16 +597,83 @@ async def cost_model_analytics(page):
     await expect(panel.get_by_label('Burn rate at selected time', exact=True)).to_contain_text('$4.50/min')
     assert requests[-1]['resolution'] == ['minute']
     assert requests[-1]['groupBy'] == ['model-reasoning']
+    assert requests[-1]['range'] == ['2h']
+    await total_view.click()
+    await expect(total_view).to_have_attribute('aria-pressed', 'true')
+    await expect(panel.get_by_label('Cost at selected time', exact=True)).to_contain_text('$9.00')
+    assert requests[-1]['range'] == ['total']
     panel_box = await panel.bounding_box()
     playback_box = await page.get_by_role('button', name=re.compile('Review$')).locator('..').bounding_box()
     assert panel_box['y'] + panel_box['height'] <= playback_box['y'], 'Cost panel overlaps bottom playback controls'
-    for control in [grouping, resolution, selected, panel.get_by_role('button', name='Earlier cost history', exact=True)]:
+    for control in [grouping, resolution, selected, total_view, recent_view]:
         box = await control.bounding_box()
         assert box and box['height'] >= 44 and box['x'] >= 0 and box['x']+box['width'] <= page.viewport_size['width']
     assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     if page.viewport_size['width'] == 390:
         await panel.evaluate('element => {element.scrollTop = 0}')
         await page.screenshot(path='/tmp/branchline-cost-analytics-phone.png')
+
+
+async def cost_time_views(page):
+    first = 1790812800000  # Oct 1, 2026 UTC
+    end = first + 20 * 86400000
+    requests = []
+    async def history_route(route):
+        query = parse_qs(urlparse(route.request.url).query)
+        requests.append(query)
+        view = query.get('range', ['total'])[0]
+        start = end - {'1h':3600000,'2h':7200000}[view] if view in ['1h','2h'] else first
+        baseline = 1 if view != 'total' else 0
+        zero = dict(input=0, output=0, cacheRead=0, cacheWrite=0, unattributed=0)
+        def point(timestamp,cost):
+            return dict(timestamp=timestamp,costUSD=cost,breakdownUSD=dict(zero,unattributed=cost))
+        history = dict(points=[point(start,baseline),point(end,4)],groups=[],range=view,
+                       totalCostUSD=4,untimedCostUSD=0,unpricedResponses=0,
+                       window=dict(start=start,end=end,startCostUSD=baseline,startBreakdownUSD=dict(zero,unattributed=baseline)),
+                       burnRate=dict(bucketMs=end-start,endTimestamp=end,points=[dict(timestamp=start,costUSDPerMinute=(4-baseline)*60000/(end-start),breakdownUSDPerMinute=dict(zero,unattributed=(4-baseline)*60000/(end-start)))]))
+        await route.fulfill(status=200,content_type='application/json',body=json.dumps(dict(sessionId='phone-primary',history=history)))
+    await page.route('**/session-cost-history?*',history_route)
+    await page.get_by_role('button',name='$Cost',exact=True).click()
+    panel = page.get_by_role('region',name='Session API costs')
+    total = panel.get_by_role('button',name='Show total cost history',exact=True)
+    hour = panel.get_by_role('button',name='Show last hour cost history',exact=True)
+    two_hours = panel.get_by_role('button',name='Show last 2 hours cost history',exact=True)
+    resolution = panel.get_by_role('combobox',name='Cost time resolution',exact=True)
+    description = panel.get_by_role('img',name='API cost over time',exact=True).locator('desc')
+    async def expect_start(timestamp):
+        label = await page.evaluate("timestamp => new Date(timestamp).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})",timestamp)
+        await expect(description).to_contain_text(label)
+    await expect(total).to_be_visible(timeout=3000)
+    await expect(total).to_have_attribute('aria-pressed','true')
+    await expect_start(first)
+    for choice in ['day','minute']:
+        await resolution.select_option(choice)
+        await expect_start(first)
+        assert requests[-1]['range']==['total']
+    await two_hours.click()
+    await expect_start(end-7200000)
+    await resolution.select_option('hour')
+    await expect_start(end-7200000)
+    await expect(two_hours).to_have_attribute('aria-pressed','true')
+    await hour.click()
+    await expect_start(end-3600000)
+    await resolution.select_option('day')
+    await expect_start(end-3600000)
+    await total.click()
+    await expect_start(first)
+    await resolution.select_option('minute')
+    await expect_start(first)
+    await expect(total).to_have_attribute('aria-pressed','true')
+    assert requests[-1]['range']==['total']
+    assert all('before' not in query for query in requests)
+    await expect(panel.get_by_role('button',name='Earlier cost history',exact=True)).to_have_count(0)
+    for button in [total,hour,two_hours]:
+        box=await button.bounding_box()
+        assert box and box['height']>=44 and box['x']>=0 and box['x']+box['width']<=page.viewport_size['width']
+    assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    if page.viewport_size['width']==390:
+        await panel.evaluate('element => {element.scrollTop=0}')
+        await page.screenshot(path='/tmp/branchline-time-views-phone.png')
 
 
 async def main():
@@ -626,7 +686,7 @@ async def main():
             launch["executable_path"] = os.environ["PLAYWRIGHT_CHROMIUM_EXECUTABLE"]
         browser = await playwright.chromium.launch(**launch)
         for width in [360, 390, 1280]:
-            for check in [tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, agent_status_filters, cost_history_graph, cost_history_retry, cost_burn_breakdown, agent_model_settings, cost_model_analytics]:
+            for check in [tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, agent_status_filters, cost_history_graph, cost_history_retry, cost_burn_breakdown, agent_model_settings, cost_model_analytics, cost_time_views]:
                 if requested and check.__name__ not in requested:
                     continue
                 context = await browser.new_context(viewport=dict(width=width, height=844), is_mobile=width < 640, has_touch=width < 640)

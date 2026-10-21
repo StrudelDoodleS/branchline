@@ -76,26 +76,20 @@ for (const [resolution, ms] of [['minute', 60000], ['hour', 3600000], ['day', 86
   })
 }
 
-test('minute history pages stay bounded while preserving cumulative baselines and every raw charge', () => {
-  const records = Array.from({ length: 11 }, (_, i) => ({ timestamp: i * 60000 + 1000, costUSD: 1 }))
-  const latest = Usage.buildCostHistory(records, 4, undefined, { resolution: 'minute' })
-  assert.equal(latest.burnRate.bucketMs, 60000)
-  assert.equal(latest.burnRate.points.length, 4)
-  assert.equal(latest.window?.start, 7 * 60000)
-  assert.equal(latest.window?.startCostUSD, 7)
-  assert.equal(latest.window?.previousEnd, 7 * 60000 - 1)
-  assert.equal(latest.window?.nextEnd, undefined)
-  assert.equal(latest.points.at(-1)!.costUSD, 11)
-  close(cost(latest), 4)
-  const earlier = Usage.buildCostHistory(records, 4, undefined, { resolution: 'minute', before: latest.window!.previousEnd })
-  assert.equal(earlier.window?.start, 3 * 60000)
-  assert.equal(earlier.window?.startCostUSD, 3)
-  assert.equal(earlier.points.at(-1)!.costUSD, 7)
-  assert.equal(earlier.totalCostUSD, 11)
-  assert.equal(earlier.window?.nextEnd, 10 * 60000 + 1000)
-  const first = Usage.buildCostHistory(records, 4, undefined, { resolution: 'minute', before: earlier.window!.previousEnd })
-  assert.equal(first.window?.previousEnd, undefined)
-  close(cost(first) + cost(earlier) + cost(latest), 11)
+test('Total keeps the same full range when switching auto to day to minute', () => {
+  const first = Date.parse('2026-10-20T00:00:00Z')
+  const records = Array.from({ length: 720 }, (_, i) => ({ timestamp: first + i * 60000, costUSD: 1 }))
+  for (const resolution of ['auto', 'day', 'minute'] as const) {
+    const history = Usage.buildCostHistory(records, 240, undefined, { resolution, range: 'total' })
+    assert.equal(history.window?.start, first)
+    assert.equal(history.window?.end, first + 719 * 60000)
+    assert.equal(history.window?.startCostUSD, 0)
+    assert.equal(history.totalCostUSD, 720)
+    close(history.points.at(-1)!.costUSD, 720)
+    close(cost(history), 720)
+    assert.ok(history.burnRate.points.length <= 240)
+    assert.ok(history.points.length <= 240)
+  }
 })
 
 test('group average burn uses a common session duration and missing dates or prices stay explicit', () => {
@@ -147,17 +141,38 @@ test('a Codex model switch cannot reprice an old response replay that omits its 
   assert.deepEqual([...tracker.costRecords()].map(record => [record.model, record.reasoningEffort]), [['gpt-6.1-sol', 'high'], ['gpt-6-astra', 'max']])
 })
 
-test('Later advances one page at real-world timestamps instead of jumping to Latest', () => {
+for (const [range, hours, baseline] of [['1h', 1, 660], ['2h', 2, 600]] as const) {
+  test(`${range} view stays fixed across resolutions and retains the earlier cumulative cost`, () => {
+    const first = Date.parse('2026-10-20T00:00:00Z')
+    const end = first + 720 * 60000 + 1000
+    const records = Array.from({ length: 720 }, (_, i) => ({ timestamp: first + i * 60000 + 1000, costUSD: 1 }))
+    for (const resolution of ['auto', 'minute', 'hour', 'day'] as const) {
+      const history = Usage.buildCostHistory(records, 240, end, { resolution, range })
+      assert.equal(history.window?.start, end - hours * 3600000)
+      assert.equal(history.window?.end, end)
+      close(history.window!.startCostUSD, baseline)
+      close(history.points.at(-1)!.costUSD, 720)
+      close(cost(history), hours * 60)
+      assert.equal(history.totalCostUSD, 720)
+      assert.ok(history.burnRate.points.length <= 240)
+    }
+  })
+}
+
+test('a quiet recent view shows flat cumulative cost and zero burn instead of an empty history', () => {
   const first = Date.parse('2026-10-20T00:00:00Z')
-  const records = Array.from({ length: 720 }, (_, i) => ({ timestamp: first + i * 60000 + 1000, costUSD: 1 }))
-  const latest = Usage.buildCostHistory(records, 240, undefined, { resolution: 'minute' })
-  const middle = Usage.buildCostHistory(records, 240, undefined, { resolution: 'minute', before: latest.window!.previousEnd })
-  const earliest = Usage.buildCostHistory(records, 240, undefined, { resolution: 'minute', before: middle.window!.previousEnd })
-  assert.equal(earliest.points.at(-1)!.costUSD, 240)
-  const forward = Usage.buildCostHistory(records, 240, undefined, { resolution: 'minute', before: earliest.window!.nextEnd })
-  assert.equal(forward.window!.start, first + 240 * 60000)
-  assert.equal(forward.points.at(-1)!.costUSD, 480)
-  const newest = Usage.buildCostHistory(records, 240, undefined, { resolution: 'minute', before: forward.window!.nextEnd })
-  assert.equal(newest.window!.start, first + 480 * 60000)
-  assert.equal(newest.points.at(-1)!.costUSD, 720)
+  const history = Usage.buildCostHistory([{ timestamp: first, costUSD: 12 }], 240, first + 3 * 3600000, { range: '1h' })
+  close(history.window!.startCostUSD, 12)
+  close(history.points.at(-1)!.costUSD, 12)
+  assert.equal(history.points.at(-1)!.timestamp, first + 3 * 3600000)
+  assert.ok(history.burnRate.points.every(point => point.costUSDPerMinute === 0))
+})
+
+test('a previous paging cursor cannot trap Total in an older window', () => {
+  const first = Date.parse('2026-10-20T00:00:00Z')
+  const options = Usage.normalizeCostHistoryOptions({ range: 'total', resolution: 'minute', before: first + 3600000 })
+  const history = Usage.buildCostHistory([{ timestamp: first, costUSD: 2 }, { timestamp: first + 12 * 3600000, costUSD: 3 }], 240, undefined, options)
+  assert.equal(history.window!.end, first + 12 * 3600000)
+  assert.equal(history.window!.start, first)
+  close(cost(history), 5)
 })

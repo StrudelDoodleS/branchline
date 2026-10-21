@@ -23,7 +23,7 @@ function HistoryPlot({ series, label, start, end, selectedTime, overlay, bucketM
   series: CostHistoryPoint[]; label: string; start: number; end: number; selectedTime: number;
   overlay: boolean; bucketMs?: number; rateSuffix?: string; onSelect: (timestamp: number) => void;
 }) {
-  const x = (time: number) => LEFT + (time - start) / Math.max(1, end - start) * (RIGHT - LEFT)
+  const x = (time: number) => LEFT + (Math.max(start, Math.min(end, time)) - start) / Math.max(1, end - start) * (RIGHT - LEFT)
   const max = Math.max(...series.map(point => point.costUSD), 0) || 1
   const y = (cost: number) => BOTTOM - cost / max * (BOTTOM - TOP)
   const selected = series.findLast(point => point.timestamp <= selectedTime) ?? series[0]
@@ -73,7 +73,7 @@ function HistoryPlot({ series, label, start, end, selectedTime, overlay, bucketM
 }
 
 export function CostHistoryChart({ sessionId }: { sessionId: string | null }) {
-  const [options, setOptions] = useState<CostHistoryOptions>({ groupBy: 'model', resolution: 'auto' })
+  const [options, setOptions] = useState<CostHistoryOptions>({ groupBy: 'model', resolution: 'auto', range: 'total' })
   const { history, error, retry } = useCostHistory(sessionId, options)
   const [selectedTime, setSelectedTime] = useState<number | null>(null)
   const [overlay, setOverlay] = useState(true)
@@ -122,20 +122,8 @@ export function CostHistoryChart({ sessionId }: { sessionId: string | null }) {
     </div>
     <p className="break-words text-[11px] text-slate-300 [overflow-wrap:anywhere]">Cumulative · {group ? `${group.model ?? 'Model unreported'}${options.groupBy === 'model-reasoning' ? ` · ${group.reasoningEffort ?? 'effort unreported'}` : ''}` : 'main + subagents'}</p>
     <CostAnalyticsControls options={options} history={history} onChange={changeOptions} />
-    {window && options.resolution !== 'auto' && <nav aria-label="Cost history windows" className="mt-3">
-      <div className="grid grid-cols-3 gap-2">
-        <button type="button" aria-label="Earlier cost history" disabled={window.previousEnd === undefined}
-          onClick={() => changeOptions({ ...options, before: window.previousEnd })}
-          className="min-h-11 rounded border border-slate-500 text-[11px] disabled:opacity-40">Earlier</button>
-        <button type="button" aria-label="Later cost history" disabled={window.nextEnd === undefined}
-          onClick={() => changeOptions({ ...options, before: window.latestEnd !== undefined && window.nextEnd! >= window.latestEnd ? undefined : window.nextEnd })}
-          className="min-h-11 rounded border border-slate-500 text-[11px] disabled:opacity-40">Later</button>
-        <button type="button" aria-label="Latest cost history" disabled={options.before === undefined}
-          onClick={() => changeOptions({ ...options, before: undefined })}
-          className="min-h-11 rounded border border-slate-500 text-[11px] disabled:opacity-40">Latest</button>
-      </div>
-      <p className="mt-1 text-[10px] text-slate-300">{date(start)} – {date(end)}. Cumulative cost includes earlier usage.</p>
-    </nav>}
+    {window && <p className="mt-2 text-[10px] text-slate-300">{date(start)} – {date(end)}.
+      {options.range !== 'total' && ' Cumulative cost includes earlier usage.'}</p>}
     {error && <div className="mt-2 flex items-center justify-between gap-2 text-amber-200">
       <p>{error}</p>
       <button type="button" aria-label="Retry cost history" onClick={retry} className="min-h-11 min-w-11 shrink-0 rounded border border-slate-500 px-2">Retry</button>
