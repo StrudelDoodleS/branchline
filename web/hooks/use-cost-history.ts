@@ -39,7 +39,13 @@ async function requestHistory(sessionId: string, options: CostHistoryOptions, si
 
 export function useCostHistory(sessionId: string | null, options: CostHistoryOptions = {}) {
   const queryKey = JSON.stringify(options)
-  const [state, setState] = useState<{ sessionId: string | null; queryKey?: string; history?: CostHistory; error?: string }>({ sessionId: null })
+  // A different range can preview the loaded series. A different session,
+  // model filter or bucket resolution must never reuse that series.
+  const scopeKey = JSON.stringify([options.groupBy ?? 'model', options.group ?? null, options.resolution ?? 'auto'])
+  const [state, setState] = useState<{
+    sessionId: string | null; scopeKey?: string; queryKey?: string; historyQueryKey?: string;
+    history?: CostHistory; error?: string; loading?: boolean;
+  }>({ sessionId: null })
   const [attempt, setAttempt] = useState(0)
   useEffect(() => {
     if (!sessionId) return
@@ -47,15 +53,17 @@ export function useCostHistory(sessionId: string | null, options: CostHistoryOpt
     let active = true
     let timer: ReturnType<typeof setTimeout> | undefined
     let controller: AbortController | undefined
-    setState({ sessionId, queryKey })
+    setState(previous => ({ sessionId, scopeKey, queryKey, loading: true,
+      ...(previous.sessionId === sessionId && previous.scopeKey === scopeKey
+        ? { history: previous.history, historyQueryKey: previous.historyQueryKey } : {}) }))
     const load = async () => {
       controller = new AbortController()
       const timeout = setTimeout(() => controller?.abort(), 10000)
       try {
         const history = await requestHistory(sessionId, query, controller.signal)
-        if (active) setState({ sessionId, queryKey, history })
+        if (active) setState({ sessionId, scopeKey, queryKey, historyQueryKey: queryKey, history, loading: false })
       } catch (error) {
-        if (active) setState(previous => ({ ...previous, sessionId, queryKey, error: error instanceof Error ? error.message : 'Could not load cost history.' }))
+        if (active) setState(previous => ({ ...previous, error: error instanceof Error ? error.message : 'Could not load cost history.', loading: false }))
       } finally {
         clearTimeout(timeout)
         if (active) timer = setTimeout(load, 5000)
@@ -63,8 +71,11 @@ export function useCostHistory(sessionId: string | null, options: CostHistoryOpt
     }
     void load()
     return () => { active = false; clearTimeout(timer); controller?.abort() }
-  }, [sessionId, queryKey, attempt])
-  const current = state.sessionId === sessionId && state.queryKey === queryKey
-  return { history: current ? state.history : undefined,
+  }, [sessionId, scopeKey, queryKey, attempt])
+  const compatible = state.sessionId === sessionId && state.scopeKey === scopeKey
+  const current = compatible && state.queryKey === queryKey
+  return { history: compatible ? state.history : undefined,
+    isPreviousData: compatible && !!state.history && state.historyQueryKey !== queryKey,
+    loading: !!sessionId && (!current || !!state.loading),
     error: current ? state.error : undefined, retry: () => setAttempt(value => value + 1) }
 }

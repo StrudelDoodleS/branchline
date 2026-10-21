@@ -1,7 +1,7 @@
 // Branchline fork modifications; see FORK.md.
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import { useCostHistory } from '@/hooks/use-cost-history'
 import { useCostChartGestures } from '@/hooks/use-cost-chart-gestures'
 import { costPlotSeries } from '@/hooks/cost-plot-series'
@@ -77,18 +77,10 @@ function HistoryPlot({ series: data, label, start, end, loaded, bounds, selected
 
 export function CostHistoryChart({ sessionId }: { sessionId: string | null }) {
   const [options, setOptions] = useState<CostHistoryOptions>({ groupBy: 'model', resolution: 'auto', range: 'total' })
-  const { history, error, retry } = useCostHistory(sessionId, options)
+  const { history, error, retry, loading, isPreviousData } = useCostHistory(sessionId, options)
   const [selectedTime, setSelectedTime] = useState<number | null>(null)
   const [overlay, setOverlay] = useState(true)
   const [preview, setPreview] = useState<CostTimeWindow | null>(null)
-  const section = useRef<HTMLElement>(null)
-  const focusedPlot = useRef<string | null>(null)
-  useEffect(() => {
-    if (!history || !focusedPlot.current) return
-    // A range fetch briefly replaces the SVG. Keep keyboard navigation usable.
-    if (document.activeElement === document.body) section.current?.querySelector<SVGSVGElement>(`svg[aria-label="${focusedPlot.current}"]`)?.focus({ preventScroll: true })
-    focusedPlot.current = null
-  }, [history])
   const points = history?.points ?? []
   const first = points[0], last = points.at(-1)
   const rate = history?.burnRate
@@ -98,8 +90,13 @@ export function CostHistoryChart({ sessionId }: { sessionId: string | null }) {
   const unavailable = !!history?.unpricedResponses
   const loadedStart = window?.start ?? Math.min(first?.timestamp ?? 0, rates[0]?.timestamp ?? first?.timestamp ?? 0)
   const loadedEnd = Math.max(window?.end ?? Math.max(last?.timestamp ?? 0, rate?.endTimestamp ?? last?.timestamp ?? 0), loadedStart + 1)
-  const start = preview?.start ?? loadedStart, end = preview?.end ?? loadedEnd
   const bounds = history?.bounds ?? { start: loadedStart, end: loadedEnd }
+  // Keep the released gesture's interval visible until its response arrives.
+  // A gesture reaching the full bounds is normalized to a Total request.
+  // Loaded data stays clipped to its own window while this request is pending.
+  const requestedWindow = isPreviousData && options.range === 'total' ? bounds
+    : isPreviousData && options.range === 'window' ? { start: options.start!, end: options.end! } : null
+  const start = preview?.start ?? requestedWindow?.start ?? loadedStart, end = preview?.end ?? requestedWindow?.end ?? loadedEnd
   const loaded = { start: loadedStart, end: loadedEnd }
   const time = Math.max(start, Math.min(end, selectedTime ?? end))
   const selectedIndex = Math.max(0, points.findLastIndex(point => point.timestamp <= time))
@@ -128,8 +125,7 @@ export function CostHistoryChart({ sessionId }: { sessionId: string | null }) {
   const changeOptions = (next: CostHistoryOptions) => { setPreview(null); setSelectedTime(null); setOptions(normalizeCostHistoryOptions({ ...next })) }
   const changeWindow = (next: CostTimeWindow) => {
     const start = Math.round(next.start), end = Math.round(next.end)
-    if (Math.abs(start - loadedStart) < 1 && Math.abs(end - loadedEnd) < 1) return
-    if (document.activeElement instanceof SVGSVGElement && section.current?.contains(document.activeElement)) focusedPlot.current = document.activeElement.getAttribute('aria-label')
+    if (Math.abs(start - (requestedWindow?.start ?? loadedStart)) < 1 && Math.abs(end - (requestedWindow?.end ?? loadedEnd)) < 1) return
     changeOptions(start <= bounds.start && end >= bounds.end ? { ...options, range: 'total' }
       : { ...options, range: 'window', start, end })
   }
@@ -137,7 +133,7 @@ export function CostHistoryChart({ sessionId }: { sessionId: string | null }) {
   const codexZeroWrites = history?.groups?.some(group => (!options.group || group.id === options.group)
     && /^gpt-(6|5\.6)/.test(group.model ?? '') && group.tokens.cacheReadTokens > 0 && group.tokens.cacheWriteTokens === 0)
 
-  return <section ref={section} aria-label="Cost history" className="mt-4 border-t pt-3" style={{ borderColor: '#475569' }}>
+  return <section aria-label="Cost history" aria-busy={loading} className="mt-4 border-t pt-3" style={{ borderColor: '#475569' }}>
     <div className="flex items-center justify-between gap-2">
       <h3 className="font-semibold text-slate-100">Cost over time</h3>
       <button type="button" aria-label="Cost breakdown" aria-pressed={overlay} onClick={() => setOverlay(value => !value)}
@@ -146,7 +142,8 @@ export function CostHistoryChart({ sessionId }: { sessionId: string | null }) {
     </div>
     <p className="break-words text-[11px] text-slate-300 [overflow-wrap:anywhere]">Cumulative · {group ? `${group.model ?? 'Model unreported'}${options.groupBy === 'model-reasoning' ? ` · ${group.reasoningEffort ?? 'effort unreported'}` : ''}` : 'main + subagents'}</p>
     <CostAnalyticsControls options={options} history={history} onChange={changeOptions} />
-    {window && <p className="mt-2 text-[10px] text-slate-300">{date(start)} – {date(end)}.
+    {/* Reserve room for the range details so committing a gesture cannot move the plots. */}
+    {window && <p className="mt-2 min-h-10 text-[10px] text-slate-300">{date(start)} – {date(end)}.
       {options.range === 'custom' ? ` Last ${options.hours}h · follows latest.` : options.range === 'window' ? ' Selected window.' : ''}
       {options.range !== 'total' && ' Cumulative cost includes earlier usage.'}</p>}
     {codexZeroWrites && <p className="mt-2 text-[10px] text-amber-200">Codex reports zero write tokens despite cache hits. These counters do not verify cache-creation costs.</p>}
@@ -163,7 +160,7 @@ export function CostHistoryChart({ sessionId }: { sessionId: string | null }) {
           <span key={source.key} className="inline-flex items-center gap-1"><span aria-hidden="true" className="inline-block h-2 w-2 rounded-sm" style={{ background: source.color }} />{source.label}</span>)}
       </div>}
       <p className="mt-2 text-[10px] text-slate-300">Pinch to zoom · drag sideways to pan · tap to inspect. Total resets.</p>
-      <p role="status" className="h-4 text-[10px] text-cyan-200">{preview ? 'Release to load this range.' : ''}</p>
+      <p role="status" className="h-4 text-[10px] text-cyan-200">{preview ? 'Release to load this range.' : loading ? 'Loading cost history…' : ''}</p>
       <HistoryPlot series={plotCosts} label="API cost over time" start={start} end={end} loaded={loaded} bounds={bounds} selectedTime={time} overlay={overlay}
         onSelect={inspectCost} onPreview={setPreview} onCommit={changeWindow} />
       {!!rates.length && <>

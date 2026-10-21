@@ -680,6 +680,7 @@ async def cost_phone_gestures(page):
     first = 1790812800000
     latest = first + 20 * 86400000
     requests = []
+    held_response = []
     zero = dict(input=0, output=0, cacheRead=0, cacheWrite=0, unattributed=0)
     async def history_route(route):
         query = parse_qs(urlparse(route.request.url).query)
@@ -691,11 +692,17 @@ async def cost_phone_gestures(page):
                  end - {'1h':3600000,'2h':7200000}[view] if view in ['1h','2h'] else first)
         baseline = max(0, (start-first)/86400000)
         def point(timestamp, cost):
-            return dict(timestamp=timestamp,costUSD=cost,breakdownUSD=dict(zero,unattributed=cost))
+            return dict(timestamp=timestamp,costUSD=cost,breakdownUSD=dict(zero,input=cost))
+        # Use attributed usage so selecting zero does not add/remove the
+        # optional Unattributed row while measuring the chart's layout.
         history = dict(points=[point(start,baseline),point(end,max(0,(end-first)/86400000))],groups=[],range=view,
                        totalCostUSD=20,untimedCostUSD=0,unpricedResponses=0,bounds=dict(start=first,end=latest),
-                       window=dict(start=start,end=end,startCostUSD=baseline,startBreakdownUSD=dict(zero,unattributed=baseline)),
-                       burnRate=dict(bucketMs=3600000,endTimestamp=end,points=[dict(timestamp=start,costUSDPerMinute=1/1440,breakdownUSDPerMinute=dict(zero,unattributed=1/1440))]))
+                       window=dict(start=start,end=end,startCostUSD=baseline,startBreakdownUSD=dict(zero,input=baseline)),
+                       burnRate=dict(bucketMs=3600000,endTimestamp=end,points=[dict(timestamp=start,costUSDPerMinute=1/1440,breakdownUSDPerMinute=dict(zero,input=1/1440))]))
+        if held_response:
+            arrived, release = held_response.pop()
+            arrived.set()
+            await release.wait()
         await route.fulfill(status=200,content_type='application/json',body=json.dumps(dict(sessionId='phone-primary',history=history)))
     await page.route('**/session-cost-history?*',history_route)
     await page.get_by_role('button',name='$Cost',exact=True).click()
@@ -716,6 +723,63 @@ async def cost_phone_gestures(page):
     await expect(total).to_have_attribute('aria-pressed','true')
     await cost.scroll_into_view_if_needed()
 
+    async def delayed_range(action, expected_window=None):
+        # Hold the real request open: a fast fixture response used to hide the
+        # SVG removal, collapsed panel and lost gesture preview on release.
+        arrived, release = asyncio.Event(), asyncio.Event()
+        held_response.append((arrived, release))
+        await panel.evaluate('''element => {
+            const plots = [...element.querySelectorAll('svg[role="img"]')];
+            window.__heldCostPlots = {plots, removed: false, scrollTop: element.scrollTop,
+              height: element.scrollHeight, boxes: plots.map(plot => plot.getBoundingClientRect().toJSON()),
+              drawn: plots.map(plot => !!plot.querySelector('path[stroke]')?.getAttribute('d')),
+              paragraphs: [...element.querySelectorAll('p')].map(p => ({text: p.textContent, height: p.getBoundingClientRect().height}))};
+            window.__heldCostObserver = new MutationObserver(records => {
+              for (const record of records) for (const node of record.removedNodes)
+                if (plots.some(plot => node === plot || node.contains?.(plot))) window.__heldCostPlots.removed = true;
+            });
+            window.__heldCostObserver.observe(element, {childList: true, subtree: true});
+        }''')
+        async def stable_plots(keep_preview=False):
+            result = await panel.evaluate('''element => {
+                const held = window.__heldCostPlots;
+                const current = [...element.querySelectorAll('svg[role="img"]')];
+                return {mounted: held.plots.every((plot, index) => plot.isConnected && plot === current[index]),
+                  removed: held.removed, scrollDelta: Math.abs(element.scrollTop-held.scrollTop),
+                  heightDelta: Math.abs(element.scrollHeight-held.height),
+                  cleared: held.drawn.some((drawn, index) => drawn && !current[index]?.querySelector('path[stroke]')?.getAttribute('d')),
+                  hidden: current.some(plot => { const style = getComputedStyle(plot); return style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0'; }),
+                  changedParagraphs: [...element.querySelectorAll('p')].flatMap((p, index) => {
+                    const height = p.getBoundingClientRect().height, before = held.paragraphs[index];
+                    return before && Math.abs(height-before.height)>1 ? [{before, after: {text:p.textContent, height}}] : [];
+                  }),
+                  moved: held.plots.some((plot, index) => Math.abs(plot.getBoundingClientRect().y-held.boxes[index].y)>1)};
+            }''')
+            assert result['mounted'] and not result['removed'], f'Range refresh detached a plot: {result}'
+            assert not result['hidden'] and (not keep_preview or not result['cleared']), f'Range refresh hid the plotted preview: {result}'
+            assert result['scrollDelta'] <= 1 and result['heightDelta'] <= 1 and not result['moved'], f'Range refresh moved the chart: {result}'
+        try:
+            await action()
+            await asyncio.wait_for(arrived.wait(), timeout=3)
+            # Wait for the release event's React update to paint while the
+            # response is still blocked, without relying on a network delay.
+            await page.evaluate('() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+            await stable_plots(keep_preview=expected_window is not None)
+            if expected_window:
+                for plot in [cost, burn]:
+                    for edge, value in zip(['start', 'end'], expected_window):
+                        actual = float(await plot.get_attribute(f'data-window-{edge}'))
+                        assert abs(actual-value) <= 1, f'Committed {edge} jumped away from the gesture preview: {actual} != {value}'
+            await expect(panel.get_by_text('Loading cost history…', exact=True)).to_be_visible()
+            async with page.expect_response(lambda response: '/session-cost-history?' in response.url):
+                release.set()
+            await expect(panel.get_by_text('Loading cost history…', exact=True)).to_have_count(0)
+            await stable_plots()
+        finally:
+            release.set()
+            held_response.clear()
+            await page.evaluate('window.__heldCostObserver.disconnect()')
+
     if page.viewport_size['width'] < 640:
         cdp = await page.context.new_cdp_session(page)
         async def touches(kind, points):
@@ -729,8 +793,9 @@ async def cost_phone_gestures(page):
         for delta in [30,35,40,45,50]:
             await touches('touchMove',[(1,cx-delta,cy),(2,cx+delta,cy)])
         assert len([q for q in requests if q.get('range')==['window']])==before, 'Fetch only when the gesture ends'
-        async with page.expect_response(lambda response: '/session-cost-history?' in response.url and 'range=window' in response.url):
-            await touches('touchEnd',[])
+        await page.evaluate('() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+        preview = [float(await cost.get_attribute(f'data-window-{edge}')) for edge in ['start', 'end']]
+        await delayed_range(lambda: touches('touchEnd',[]), preview)
         query = requests[-1]
         assert abs(float(query['start'][0])-(first+5*86400000)) < 20, query
         assert abs(float(query['end'][0])-(first+15*86400000)) < 20, query
@@ -748,8 +813,9 @@ async def cost_phone_gestures(page):
         await touches('touchStart',[(1,cx,cy)])
         for delta in [.05,.1,.15,.2]:
             await touches('touchMove',[(1,cx+width*delta,cy)])
-        async with page.expect_response(lambda response: '/session-cost-history?' in response.url and 'range=window' in response.url):
-            await touches('touchEnd',[])
+        await page.evaluate('() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+        preview = [float(await cost.get_attribute(f'data-window-{edge}')) for edge in ['start', 'end']]
+        await delayed_range(lambda: touches('touchEnd',[]), preview)
         query = requests[-1]
         start, end = float(query['start'][0]),float(query['end'][0])
         assert abs(start-(first+3*86400000)) < 30, query
@@ -778,6 +844,16 @@ async def cost_phone_gestures(page):
         await touches('touchCancel',[])
         await expect(cost).to_have_attribute('data-window-start',query['start'][0])
         assert len([q for q in requests if q.get('range')==['window']])==before
+        # Pinching out to the full bounds normalizes the request to Total.
+        # Releasing must retain that full preview while Total is still loading.
+        await touches('touchStart',[(1,cx-50,cy),(2,cx+50,cy)])
+        for delta in [40,30,25,20]:
+            await touches('touchMove',[(1,cx-delta,cy),(2,cx+delta,cy)])
+        await expect(cost).to_have_attribute('data-window-start',str(first))
+        await expect(cost).to_have_attribute('data-window-end',str(latest))
+        await delayed_range(lambda: touches('touchEnd',[]), [first, latest])
+        assert requests[-1]['range']==['total'] and 'start' not in requests[-1] and 'end' not in requests[-1]
+        await expect(total).to_have_attribute('aria-pressed','true')
         await cdp.detach()
     else:
         await cost.focus()
@@ -785,7 +861,16 @@ async def cost_phone_gestures(page):
         await expect(cost).to_have_attribute('data-window-start',str(first+5*86400000))
         await page.keyboard.press('ArrowRight')
         await expect(cost).to_have_attribute('data-window-start',str(first+7.5*86400000).replace('.0',''))
-    await total.click()
+        await expect(panel.get_by_role('region',name='Cost history')).to_have_attribute('aria-busy','false')
+        await delayed_range(lambda: cost.press('-'), [first, latest])
+        assert requests[-1]['range']==['total'] and 'start' not in requests[-1] and 'end' not in requests[-1]
+        await expect(total).to_have_attribute('aria-pressed','true')
+    # Load a window again so the Total preset still exercises a new request.
+    await cost.press('+')
+    await expect(cost).to_have_attribute('data-window-start',str(first+5*86400000))
+    await expect(panel.get_by_role('region',name='Cost history')).to_have_attribute('aria-busy','false')
+    await total.scroll_into_view_if_needed()
+    await delayed_range(lambda: total.click())
     await expect(cost).to_have_attribute('data-window-start',str(first))
     await expect(burn).to_have_attribute('data-window-end',str(latest))
     assert requests[-1]['range']==['total'] and 'start' not in requests[-1] and 'hours' not in requests[-1]
@@ -795,10 +880,153 @@ async def cost_phone_gestures(page):
         assert box and box['height']>=44 and box['x']>=0 and box['x']+box['width']<=page.viewport_size['width']
     if page.viewport_size['width']==390:
         await hours.fill('3.5')
-        await panel.get_by_role('button',name='Apply last hours',exact=True).click()
+        await delayed_range(lambda: panel.get_by_role('button',name='Apply last hours',exact=True).click())
         await expect(cost).to_have_attribute('data-window-start',str(latest-12600000))
         await cost.scroll_into_view_if_needed()
         await page.screenshot(path='/tmp/branchline-gesture-phone.png')
+
+
+async def cost_history_pending_queries(page):
+    first, latest = 1790812800000, 1790812800000 + 20 * 86400000
+    model = '["claude-opus-5-5",null]'
+    zero = dict(input=0, output=0, cacheRead=0, cacheWrite=0, unattributed=0)
+    pending = []
+    gates = []
+    await page.clock.install()
+
+    async def history_route(route):
+        query = parse_qs(urlparse(route.request.url).query)
+        gate = pending.pop(0) if pending else None
+        if gate:
+            gate['query'] = query
+            gate['arrived'].set()
+            await gate['release'].wait()
+        try:
+            if gate and gate.get('fail'):
+                await route.fulfill(status=503, body='temporarily unavailable')
+                return
+            session = query['sessionId'][0]
+            view = query.get('range', ['total'])[0]
+            end = int(query['end'][0]) if view == 'window' else latest
+            start = int(query['start'][0]) if view == 'window' else latest - {'1h':3600000, '2h':7200000, 'custom':10800000}.get(view, latest-first)
+            total = 9 if session == 'phone-other' else 2 if query.get('group') else 4
+            bucket = {'hour':3600000, 'day':86400000}.get(query.get('resolution', ['auto'])[0], 60000)
+            group = dict(id=model, model='claude-opus-5-5', records=2, costUSD=2, knownCostUSD=2,
+                         tokens=dict(inputTokens=1000, outputTokens=1000, cacheReadTokens=0, cacheWriteTokens=0, cacheWrite1hTokens=0, reasoningTokens=0),
+                         totalTokens=2000, breakdownUSD=dict(zero, unattributed=2), averageCostUSDPerMinute=.1)
+            history = dict(points=[dict(timestamp=start, costUSD=0, breakdownUSD=zero),
+                                   dict(timestamp=end, costUSD=total, breakdownUSD=dict(zero, unattributed=total))],
+                           groups=[group], range=view, totalCostUSD=total, untimedCostUSD=0, unpricedResponses=0,
+                           bounds=dict(start=first, end=latest), window=dict(start=start, end=end, startCostUSD=0, startBreakdownUSD=zero),
+                           burnRate=dict(bucketMs=bucket, endTimestamp=end, points=[dict(timestamp=end-bucket+1,
+                             costUSDPerMinute=total*60000/bucket, breakdownUSDPerMinute=dict(zero, unattributed=total*60000/bucket))]))
+            await route.fulfill(status=200, content_type='application/json', body=json.dumps(dict(sessionId=session, history=history)))
+        finally:
+            if gate:
+                gate['done'].set()
+
+    async def hold(action, fail=False):
+        gate = dict(arrived=asyncio.Event(), release=asyncio.Event(), done=asyncio.Event(), fail=fail)
+        pending.append(gate)
+        gates.append(gate)
+        await action()
+        await asyncio.wait_for(gate['arrived'].wait(), timeout=3)
+        return gate
+
+    async def complete(gate):
+        gate['release'].set()
+        await asyncio.wait_for(gate['done'].wait(), timeout=3)
+
+    try:
+        await page.route('**/session-cost-history?*', history_route)
+        await page.get_by_role('button', name='$Cost', exact=True).click()
+        panel = page.get_by_role('region', name='Session API costs')
+        cost = panel.get_by_role('img', name='API cost over time', exact=True)
+        burn = panel.get_by_role('img', name='API dollar burn rate', exact=True)
+        value = panel.get_by_label('Cost at selected time', exact=True)
+        await expect(value).to_have_text('$4.00')
+        original_cost, original_burn = await cost.element_handle(), await burn.element_handle()
+        old = await hold(lambda: panel.get_by_role('button', name='Show last hour cost history', exact=True).click())
+        assert await original_cost.evaluate('element => element.isConnected'), 'Range fetch removed the previous cost plot'
+        assert await original_burn.evaluate('element => element.isConnected'), 'Range fetch removed the previous burn plot'
+        await expect(panel.get_by_role('region', name='Cost history')).to_have_attribute('aria-busy', 'true')
+        latest_query = await hold(lambda: panel.get_by_role('button', name='Show last 2 hours cost history', exact=True).click())
+        await complete(latest_query)
+        await expect(cost).to_have_attribute('data-window-start', str(latest-7200000))
+        await complete(old)
+        await expect(cost).to_have_attribute('data-window-start', str(latest-7200000))
+        assert await original_cost.evaluate('element => element.isConnected'), 'A superseded reply replaced the plot'
+
+        # A second gesture can restore the loaded interval while its zoom is
+        # still pending; comparing commits only with the loaded data drops it.
+        zoom = await hold(lambda: cost.press('+'))
+        await expect(cost).to_have_attribute('data-window-start', str(latest-5400000))
+        restore = await hold(lambda: cost.press('-'))
+        await expect(cost).to_have_attribute('data-window-start', str(latest-7200000))
+        await complete(restore)
+        await expect(panel.get_by_role('region', name='Cost history')).to_have_attribute('aria-busy', 'false')
+        await complete(zoom)
+        await expect(cost).to_have_attribute('data-window-start', str(latest-7200000))
+
+        # A loaded zoomed window can expand to the complete bounds. The
+        # normalized Total request must keep those bounds pending its response.
+        total = panel.get_by_role('button', name='Show total cost history', exact=True)
+        await total.click()
+        await expect(cost).to_have_attribute('data-window-start', str(first))
+        await expect(panel.get_by_role('region', name='Cost history')).to_have_attribute('aria-busy', 'false')
+        await cost.press('+')
+        await expect(cost).to_have_attribute('data-window-start', str(first+5*86400000))
+        await expect(panel.get_by_role('region', name='Cost history')).to_have_attribute('aria-busy', 'false')
+        full = await hold(lambda: cost.press('-'))
+        assert full['query']['range'] == ['total'] and 'start' not in full['query'] and 'end' not in full['query']
+        for plot in [cost, burn]:
+            await expect(plot).to_have_attribute('data-window-start', str(first))
+            await expect(plot).to_have_attribute('data-window-end', str(latest))
+        assert await original_cost.evaluate('element => element.isConnected'), 'Full-bounds zoom removed the previous cost plot'
+        assert await original_burn.evaluate('element => element.isConnected'), 'Full-bounds zoom removed the previous burn plot'
+        await expect(total).to_have_attribute('aria-pressed', 'true')
+        await complete(full)
+        await expect(panel.get_by_role('region', name='Cost history')).to_have_attribute('aria-busy', 'false')
+        await expect(cost).to_have_attribute('data-window-start', str(first))
+        await expect(burn).to_have_attribute('data-window-end', str(latest))
+
+        # Failed range requests retain usable plots; Retry replaces their data.
+        await panel.get_by_role('spinbutton', name='Last hours', exact=True).fill('3')
+        failed = await hold(lambda: panel.get_by_role('button', name='Apply last hours', exact=True).click(), fail=True)
+        await complete(failed)
+        await expect(panel.get_by_role('button', name='Retry cost history', exact=True)).to_be_visible()
+        assert await original_cost.evaluate('element => element.isConnected')
+        retry = await hold(lambda: panel.get_by_role('button', name='Retry cost history', exact=True).click())
+        assert await original_burn.evaluate('element => element.isConnected')
+        await complete(retry)
+        await expect(cost).to_have_attribute('data-window-start', str(latest-10800000))
+        await expect(panel.get_by_role('button', name='Retry cost history', exact=True)).to_have_count(0)
+
+        # Incompatible scopes must never display the preceding scope's values.
+        for action, expected in [
+            (lambda: panel.get_by_role('button', name='Filter costs for Opus 5.5', exact=True).click(), '$2.00'),
+            (lambda: panel.get_by_role('combobox', name='Cost time resolution', exact=True).select_option('hour'), '$2.00'),
+            (lambda: panel.get_by_role('combobox', name='Group costs by', exact=True).select_option('model-reasoning'), '$4.00'),
+            (lambda: page.get_by_role('combobox', name='Main session').select_option('phone-other'), '$9.00'),
+        ]:
+            gate = await hold(action)
+            await expect(cost).to_have_count(0)
+            await expect(burn).to_have_count(0)
+            await expect(value).to_have_count(0)
+            await complete(gate)
+            await expect(value).to_have_text(expected)
+        # The same query still refreshes in place on the existing five-second loop.
+        current = await cost.element_handle()
+        refresh = await hold(lambda: page.clock.fast_forward(5000))
+        assert refresh['query']['sessionId'] == ['phone-other']
+        assert await current.evaluate('element => element.isConnected')
+        await complete(refresh)
+        await expect(value).to_have_text('$9.00')
+        assert await current.evaluate('element => element.isConnected')
+
+    finally:
+        for gate in gates:
+            gate['release'].set()
 
 
 async def main():
@@ -811,7 +1039,7 @@ async def main():
             launch["executable_path"] = os.environ["PLAYWRIGHT_CHROMIUM_EXECUTABLE"]
         browser = await playwright.chromium.launch(**launch)
         for width in [360, 390, 1280]:
-            for check in [tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, agent_status_filters, cost_history_graph, cost_history_retry, cost_burn_breakdown, agent_model_settings, cost_model_analytics, cost_time_views, cost_phone_gestures]:
+            for check in [tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, agent_status_filters, cost_history_graph, cost_history_retry, cost_burn_breakdown, agent_model_settings, cost_model_analytics, cost_time_views, cost_phone_gestures, cost_history_pending_queries]:
                 if requested and check.__name__ not in requested:
                     continue
                 context = await browser.new_context(viewport=dict(width=width, height=844), is_mobile=width < 640, has_touch=width < 640)
@@ -872,7 +1100,7 @@ async def main():
                     if os.environ.get('PHONE_CHECK_TRACEBACK'):
                         import traceback
                         traceback.print_exc()
-                        print('Touch diagnostic:',await page.evaluate('({events:window.__chartPointers?.slice(-20),scale:visualViewport.scale,scroll:document.querySelector("[aria-label=\"Session API costs\"]")?.scrollTop})'))
+                        print('Touch diagnostic:',await page.evaluate('''({events:window.__chartPointers?.slice(-20),scale:visualViewport.scale,scroll:document.querySelector('[aria-label="Session API costs"]')?.scrollTop})'''))
                     failures.append(f"{width}/{check.__name__}")
                     print("FAIL", width, check.__name__, str(error).split("Call log:")[0].strip(), flush=True)
                 finally:
