@@ -43,13 +43,15 @@ describe('Codex cumulative API usage', () => {
     for (const authoritative of [true, false]) {
       const parser = new CodexRolloutParser({ emit: () => {}, elapsed: () => 999999 })
       const state = createCodexRolloutState()
-      parser.processLine(JSON.stringify({ type: 'turn_context', payload: { model: 'gpt-6.1-sol' } }), state)
+      parser.processLine(JSON.stringify({ type: 'turn_context', payload: { model: 'gpt-6.1-sol', effort: 'max' } }), state)
       const usage = { input_tokens: 10000, cached_input_tokens: 8000, output_tokens: 1000 }
       const record = authoritative
         ? { type: 'token_usage_record', payload: { response_id: 'dated', usage, thread_token_usage: usage } }
         : { type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: usage, last_token_usage: usage } } }
       parser.processLine(JSON.stringify({ ...record, timestamp: '2026-10-18T10:00:00Z' }), state)
       assert.deepEqual([...state.usage.costRecords()], [{ timestamp: Date.parse('2026-10-18T10:00:00Z'), costUSD: 0.0148,
+        model: 'gpt-6.1-sol', reasoningEffort: 'max',
+        tokens: { inputTokens: 2000, outputTokens: 1000, cacheReadTokens: 8000, cacheWriteTokens: 0, cacheWrite1hTokens: 0, reasoningTokens: 0 },
         breakdownUSD: { input: 0.004, output: 0.01, cacheRead: 0.0008, cacheWrite: 0, unattributed: 0 } }])
     }
   })

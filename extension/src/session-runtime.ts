@@ -33,7 +33,7 @@ export interface AgentSessionWatcher extends TypedDisposable {
   isActive(): boolean
   isSessionActive(sessionId: string): boolean
   getActiveSessions(): SessionInfo[]
-  getCostHistory?(sessionId: string): import('./token-usage').CostHistory | undefined
+  getCostHistory?(sessionId: string, options?: import('./token-usage').CostHistoryOptions): import('./token-usage').CostHistory | undefined
   replaySessionStart(sessionIds?: string[]): void
 }
 

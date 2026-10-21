@@ -144,6 +144,10 @@ test('completed Claude cost histories do not acquire a growing idle tail', conte
     watcher.replaySessionStart([id])
     assert.equal(metadataEvents.find(event => event.type === 'model_detected')?.payload.reasoningEffort, 'xhigh')
     assert.equal(watcher.getCostHistory(id)!.burnRate.endTimestamp, now)
+    const analytics = watcher.getCostHistory(id, { resolution: 'hour', groupBy: 'model-reasoning' })!
+    assert.equal(analytics.burnRate.bucketMs, 3600000)
+    assert.equal(analytics.groups?.[0].model, 'claude-opus-5-5')
+    assert.equal(analytics.groups?.[0].reasoningEffort, 'xhigh')
     context.mock.timers.tick(5 * 60000 + 1)
     assert.equal(watcher.getActiveSessions()[0].status, 'completed')
     const finished = watcher.getCostHistory(id)!

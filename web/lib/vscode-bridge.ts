@@ -9,6 +9,7 @@
 
 export type { AgentEvent, SessionInfo, ConnectionStatus } from './bridge-types'
 import type { AgentEvent, SessionInfo, ConnectionStatus } from './bridge-types'
+import type { CostHistoryOptions } from '../../extension/src/token-usage'
 
 type InitCallback = () => void
 type EventCallback = (event: AgentEvent) => void
@@ -150,8 +151,8 @@ class VSCodeBridge {
     this.postToExtension({ type: 'open-file', filePath, line })
   }
 
-  requestCostHistory(sessionId: string, requestId: number): void {
-    this.postToExtension({ type: 'request-cost-history', sessionId, requestId })
+  requestCostHistory(sessionId: string, requestId: number, options?: CostHistoryOptions): void {
+    this.postToExtension({ type: 'request-cost-history', sessionId, requestId, options })
   }
 
   private postToExtension(message: Record<string, unknown>): void {

@@ -27,7 +27,7 @@ import {
 } from './codex-rollout-parser'
 import type { AgentSessionWatcher, SessionLifecycleEvent } from './session-runtime'
 import { TypedEventEmitter } from './typed-event-emitter'
-import { buildCostHistory, type CostRecord } from './token-usage'
+import { buildCostHistory, type CostRecord, type CostHistoryOptions } from './token-usage'
 
 const log = createLogger('CodexSessionWatcher')
 
@@ -205,13 +205,13 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
     }
   }
 
-  getCostHistory(sessionId: string) {
+  getCostHistory(sessionId: string, options?: CostHistoryOptions) {
     if (!this.sessions.has(sessionId)) return
     const members = [...this.sessions.values()].filter(member => this.rootSession(member.sessionId)?.sessionId === sessionId)
     function* records(): IterableIterator<CostRecord> {
       for (const member of members) yield* member.rolloutState.usage.costRecords()
     }
-    return buildCostHistory(records(), 240, this.isSessionActive(sessionId) ? Date.now() : undefined)
+    return buildCostHistory(records(), 240, this.isSessionActive(sessionId) ? Date.now() : undefined, options)
   }
 
   start(): void {

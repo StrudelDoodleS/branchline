@@ -103,6 +103,9 @@ test('a main session history includes every level of Codex subagents and stays s
     assert.deepEqual(history?.points.map(point => point.timestamp), [1000, 2000, 3000])
     assert.ok(Math.abs(history!.totalCostUSD! - 0.0444) < 1e-10)
     assert.equal(watcher.getCostHistory?.(ids[3])?.totalCostUSD, 0.0148)
+    const daily = watcher.getCostHistory(ids[0], { resolution: 'day', groupBy: 'model-reasoning' })!
+    assert.equal(daily.burnRate.bucketMs, 86400000)
+    assert.equal(daily.groups?.[0].records, 3)
     assert.equal(watcher.getCostHistory?.('unknown'), undefined)
   } finally {
     watcher.dispose()

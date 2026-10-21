@@ -19,7 +19,7 @@ export function UsagePanel({ visible, agents, sessionId, onClose }: { visible: b
   return <section role="region" aria-label="Session API costs" {...stopPropagationHandlers}
     className="absolute rounded-lg border p-3 font-mono text-xs shadow-xl"
     style={{ top: 'var(--agent-controls-bottom, 48px)', right: 12, width: 'min(340px, calc(100% - 24px))',
-      maxHeight: 'calc(100% - var(--agent-controls-bottom, 48px) - 18px)', overflowY: 'auto',
+      maxHeight: 'calc(100% - var(--agent-controls-bottom, 48px) - 88px)', overflowY: 'auto',
       zIndex: Z.sidePanel, background: '#0f172a', borderColor: '#475569', color: '#e2e8f0' }}>
     <div className="flex items-center justify-between gap-2">
       <h2 className="font-semibold">API COST</h2>

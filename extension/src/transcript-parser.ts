@@ -315,7 +315,8 @@ export class TranscriptParser {
     const id = msg.id || entry.uuid
     if (!tokens || !id) return
     session.usageLedger ??= new UsageLedger()
-    const owner = session.usageLedger.record(id, agentName, msg.model ?? '', tokens, undefined, Date.parse(entry.timestamp ?? ''), claudeUsageCalls(msg.usage))
+    const owner = session.usageLedger.record(id, agentName, msg.model ?? '', tokens, undefined, Date.parse(entry.timestamp ?? ''), claudeUsageCalls(msg.usage),
+      { effort: entry.effort, perTurnEffort: entry.perTurnEffort })
     if (owner && owner !== agentName) this.delegate.emitContextUpdate(owner, session, session.sessionId)
   }
 

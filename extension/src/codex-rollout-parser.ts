@@ -293,7 +293,7 @@ export class CodexRolloutParser {
         return this.handleEventMsg(record.payload, state, Date.parse(record.timestamp ?? ''))
       case 'token_usage_record':
         if (isRecord(record.payload)) {
-          state.usage.recordResponse(record.payload, state.model ?? '', Date.parse(record.timestamp ?? ''))
+          state.usage.recordResponse(record.payload, state.model ?? '', Date.parse(record.timestamp ?? ''), state.reasoningEffort)
           this.emitContextUpdate(state)
         }
         return
@@ -553,7 +553,7 @@ export class CodexRolloutParser {
   private handleTokenCount(payload: Record<string, unknown>, state: CodexRolloutState, timestamp?: number): void {
     const info = payload.info
     if (!isRecord(info)) return
-    state.usage.record(info, state.model ?? '', timestamp)
+    state.usage.record(info, state.model ?? '', timestamp, state.reasoningEffort)
 
     if (typeof info.model_context_window === 'number' && info.model_context_window > 0) {
       state.reportedContextWindow = info.model_context_window

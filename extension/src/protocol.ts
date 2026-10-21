@@ -61,7 +61,7 @@ export interface VisualizerConfig {
 // ─── Webview → Extension Messages ────────────────────────────────────────────
 
 export type WebviewToExtensionMessage =
-  | { type: 'request-cost-history'; sessionId: string; requestId: number }
+  | { type: 'request-cost-history'; sessionId: string; requestId: number; options?: import('./token-usage').CostHistoryOptions }
   | { type: 'ready' }
   | { type: 'request-connect' }
   | { type: 'request-disconnect' }

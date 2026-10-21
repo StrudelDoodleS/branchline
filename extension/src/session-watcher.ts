@@ -15,7 +15,7 @@ import { handlePermissionDetection } from './permission-detection'
 import { scanSubagentsDir, readSubagentNewLines } from './subagent-watcher'
 import { createLogger } from './logger'
 import { claudeContextPayload } from './claude-context'
-import { buildCostHistory } from './token-usage'
+import { buildCostHistory, type CostHistoryOptions } from './token-usage'
 
 const log = createLogger('SessionWatcher')
 
@@ -103,9 +103,9 @@ export class SessionWatcher implements AgentSessionWatcher {
     }))
   }
 
-  getCostHistory(sessionId: string) {
+  getCostHistory(sessionId: string, options?: CostHistoryOptions) {
     const session = this.sessions.get(sessionId)
-    return session ? buildCostHistory(session.usageLedger?.costRecords() ?? [], 240, session.sessionCompleted ? undefined : Date.now()) : undefined
+    return session ? buildCostHistory(session.usageLedger?.costRecords() ?? [], 240, session.sessionCompleted ? undefined : Date.now(), options) : undefined
   }
 
   /** Re-emit session start + conversation events for a newly connected webview.

@@ -14,17 +14,11 @@ export interface UsageTotals extends TokenCounts {
   costUSD: number | null
 }
 
-export interface CostBreakdown { input: number; output: number; cacheRead: number; cacheWrite: number; unattributed: number }
-export interface CostRecord { timestamp?: number; costUSD: number | null; breakdownUSD?: CostBreakdown }
-export interface CostHistoryPoint { timestamp: number; costUSD: number; breakdownUSD: CostBreakdown }
-export interface BurnRatePoint { timestamp: number; costUSDPerMinute: number; breakdownUSDPerMinute: CostBreakdown }
-export interface CostHistory {
-  points: CostHistoryPoint[]
-  burnRate: { bucketMs: number; endTimestamp?: number; points: BurnRatePoint[] }
-  untimedCostUSD: number
-  totalCostUSD: number | null
-  unpricedResponses: number
-}
+export * from './cost-history'
+import type { CostRecord, CostBreakdown } from './cost-history'
+
+export interface ReasoningSettings { effort?: string | null; perTurnEffort?: string | null }
+interface UsageCall extends TokenCounts { model?: string; kind?: string; reasoningEffort?: string | null }
 
 const PARTS = ['input', 'output', 'cacheRead', 'cacheWrite', 'unattributed'] as const
 const emptyBreakdown = (): CostBreakdown => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, unattributed: 0 })
@@ -32,57 +26,6 @@ function addBreakdown(target: CostBreakdown, source: CostBreakdown, factor = 1):
   for (const key of PARTS) target[key] += source[key] * factor
 }
 const sumBreakdown = (parts: CostBreakdown) => parts.input + parts.cacheRead + parts.cacheWrite + parts.output + parts.unattributed
-
-/** Cumulative dated cost, bounded for display without losing the final total. */
-export function buildCostHistory(records: Iterable<CostRecord>, maxPoints = 240, now?: number): CostHistory {
-  const dated = new Map<number, { costUSD: number; breakdownUSD: CostBreakdown }>()
-  let untimedCostUSD = 0, unpricedResponses = 0, total = 0
-  for (const record of records) {
-    if (record.costUSD === null || !Number.isFinite(record.costUSD) || record.costUSD < 0) {
-      unpricedResponses++
-      continue
-    }
-    total += record.costUSD
-    if (record.timestamp === undefined || !Number.isFinite(record.timestamp) || record.timestamp < 0) {
-      untimedCostUSD += record.costUSD
-    } else {
-      const entry = dated.get(record.timestamp) ?? { costUSD: 0, breakdownUSD: emptyBreakdown() }
-      entry.costUSD += record.costUSD
-      addBreakdown(entry.breakdownUSD, record.breakdownUSD ?? { ...emptyBreakdown(), unattributed: record.costUSD })
-      dated.set(record.timestamp, entry)
-    }
-  }
-  let cumulative = 0
-  const cumulativeParts = emptyBreakdown()
-  const ordered = [...dated].sort(([a], [b]) => a - b)
-  const all = ordered.map(([timestamp, entry]) => {
-    addBreakdown(cumulativeParts, entry.breakdownUSD)
-    return { timestamp, costUSD: cumulative += entry.costUSD, breakdownUSD: { ...cumulativeParts } }
-  })
-  const limit = Math.max(2, Number.isFinite(maxPoints) ? Math.floor(maxPoints) : 240)
-  const points = all.length <= limit ? all : Array.from({ length: limit }, (_, i) => all[Math.round(i * (all.length - 1) / (limit - 1))])
-  const burnRate: CostHistory['burnRate'] = { bucketMs: 60000, points: [] }
-  if (ordered.length) {
-    const first = ordered[0][0], last = ordered.at(-1)![0]
-    const end = now !== undefined && Number.isFinite(now) ? Math.max(last, now) : last
-    burnRate.endTimestamp = end
-    const minimumMinutes = Math.max(1, (end - first) / (limit - 1) / 60000)
-    const magnitude = 10 ** Math.floor(Math.log10(minimumMinutes))
-    burnRate.bucketMs = [1, 2, 5, 10].map(n => n * magnitude).find(n => n >= minimumMinutes)! * 60000
-    const start = Math.floor(first / burnRate.bucketMs) * burnRate.bucketMs
-    const count = Math.floor((end - start) / burnRate.bucketMs) + 1
-    burnRate.points = Array.from({ length: count }, (_, i) => ({ timestamp: start + i * burnRate.bucketMs,
-      costUSDPerMinute: 0, breakdownUSDPerMinute: emptyBreakdown() }))
-    // Integrate raw charges into fixed time buckets before display sampling.
-    // Empty buckets are retained so idle gaps cannot look like ongoing spend.
-    for (const [timestamp, entry] of ordered) {
-      const bucket = burnRate.points[Math.floor((timestamp - start) / burnRate.bucketMs)]
-      bucket.costUSDPerMinute += entry.costUSD * 60000 / burnRate.bucketMs
-      addBreakdown(bucket.breakdownUSDPerMinute, entry.breakdownUSD, 60000 / burnRate.bucketMs)
-    }
-  }
-  return { points, burnRate, untimedCostUSD, totalCostUSD: unpricedResponses ? null : total, unpricedResponses }
-}
 
 type Rates = { input: number; output: number; read: number; write: number; write1h?: number; longAfter?: number; longInput?: number; longOutput?: number }
 
@@ -145,14 +88,19 @@ function normalizeClaudeCallUsage(raw: unknown): TokenCounts | undefined {
 }
 
 /** Threshold compaction adds sampling calls omitted from top-level usage. */
-export function claudeUsageCalls(raw: unknown): Array<TokenCounts & { model?: string }> | undefined {
+export function claudeUsageCalls(raw: unknown): UsageCall[] | undefined {
   const iterations = object(raw).iterations
-  const calls: Array<TokenCounts & { model?: string }> = []
+  const calls: UsageCall[] = []
   for (const rawCall of Array.isArray(iterations) && iterations.length ? iterations : [raw]) {
     const tokens = normalizeClaudeCallUsage(rawCall)
     if (!tokens) return
-    const model = object(rawCall).model
-    calls.push({ ...tokens, ...(typeof model === 'string' && model ? { model } : {}) })
+    const call = object(rawCall)
+    const model = call.model
+    const hasEffort = 'perTurnEffort' in call || 'effort' in call
+    const effort = call.perTurnEffort ?? call.effort
+    calls.push({ ...tokens, ...(typeof model === 'string' && model ? { model } : {}),
+      ...(typeof call.type === 'string' ? { kind: call.type } : {}),
+      ...(hasEffort ? { reasoningEffort: typeof effort === 'string' ? effort.trim() || null : null } : {}) })
   }
   return calls
 }
@@ -202,22 +150,41 @@ export function apiCost(model: string, tokens: TokenCounts, requestInput?: numbe
 /** Replace response snapshots rather than adding every streamed content block.
  * Response IDs are session-wide, so inline progress and subagent files dedup. */
 export class UsageLedger {
-  private responses = new Map<string, { agent: string; model: string; tokens: TokenCounts; cost: number | null; breakdown: CostBreakdown | null; timestamp?: number }>()
+  private responses = new Map<string, { agent: string; model: string; tokens: TokenCounts; cost: number | null;
+    breakdown: CostBreakdown | null; timestamp?: number; effort?: string; perTurnEffort?: string; records: CostRecord[] }>()
   private agents = new Map<string, { tokens: TokenCounts; cost: number; unpriced: number }>()
 
-  record(id: string, agent: string, model: string, tokens: TokenCounts, requestInput?: number, timestamp?: number, calls?: ReadonlyArray<TokenCounts & { model?: string }>): string | undefined {
+  record(id: string, agent: string, model: string, tokens: TokenCounts, requestInput?: number, timestamp?: number,
+    calls?: ReadonlyArray<UsageCall>, settings: ReasoningSettings = {}): string | undefined {
     const old = this.responses.get(id)
     const at = timestamp !== undefined && Number.isFinite(timestamp) && timestamp >= 0 ? timestamp : undefined
+    if (old && tokens.outputTokens < old.tokens.outputTokens) return
     model ||= old?.model ?? ''
+    const effort = settings.effort === undefined ? old?.effort : settings.effort?.trim() || undefined
+    const perTurnEffort = settings.perTurnEffort === undefined ? old?.perTurnEffort : settings.perTurnEffort?.trim() || undefined
+    const reasoningEffort = perTurnEffort || effort
     let breakdown: CostBreakdown | null = emptyBreakdown()
+    const records: CostRecord[] = []
     for (const call of calls ?? [tokens]) {
-      const parts = apiCostBreakdown('model' in call && typeof call.model === 'string' ? call.model : model, call, calls ? undefined : requestInput)
-      if (!parts) { breakdown = null; break }
-      addBreakdown(breakdown, parts)
+      const callModel = 'model' in call && typeof call.model === 'string' ? call.model : model
+      const parts = apiCostBreakdown(callModel, call, calls ? undefined : requestInput)
+      const callEffort = 'reasoningEffort' in call ? call.reasoningEffort ?? undefined
+        : (!('kind' in call) || call.kind === 'message') && callModel === model ? reasoningEffort : undefined
+      const callTokens = emptyCounts()
+      for (const key of KEYS) callTokens[key] = call[key]
+      records.push({ model: callModel || undefined, reasoningEffort: callEffort, tokens: callTokens,
+        timestamp: old?.timestamp ?? at, costUSD: parts ? sumBreakdown(parts) : null, breakdownUSD: parts ?? undefined })
+      if (!parts) breakdown = null
+      else if (breakdown) addBreakdown(breakdown, parts)
     }
-    if (old && (tokens.outputTokens < old.tokens.outputTokens || (model === old.model && KEYS.every(key => tokens[key] === old.tokens[key])
-      && PARTS.every(key => old.breakdown?.[key] === breakdown?.[key])))) {
-      if (old.timestamp === undefined && at !== undefined) { old.timestamp = at; return old.agent }
+    if (old && model === old.model && KEYS.every(key => tokens[key] === old.tokens[key])
+      && PARTS.every(key => old.breakdown?.[key] === breakdown?.[key]) && old.effort === effort && old.perTurnEffort === perTurnEffort
+      && old.records.length === records.length && records.every((record, index) => {
+        const previous = old.records[index]
+        return record.model === previous.model && record.reasoningEffort === previous.reasoningEffort
+          && record.costUSD === previous.costUSD && KEYS.every(key => record.tokens?.[key] === previous.tokens?.[key])
+      })) {
+      if (old.timestamp === undefined && at !== undefined) { old.timestamp = at; old.records = records; return old.agent }
       return
     }
     const owner = old?.agent ?? agent
@@ -227,12 +194,13 @@ export class UsageLedger {
     entry.cost += (cost ?? 0) - (old?.cost ?? 0)
     entry.unpriced += Number(cost === null) - Number(old?.cost === null)
     this.agents.set(owner, entry)
-    this.responses.set(id, { agent: owner, model, tokens: { ...tokens }, cost, breakdown, timestamp: old?.timestamp ?? at })
+    this.responses.set(id, { agent: owner, model, tokens: { ...tokens }, cost, breakdown, timestamp: old?.timestamp ?? at,
+      effort, perTurnEffort, records })
     return owner
   }
 
   *costRecords(): IterableIterator<CostRecord> {
-    for (const response of this.responses.values()) yield { timestamp: response.timestamp, costUSD: response.cost, breakdownUSD: response.breakdown ?? undefined }
+    for (const response of this.responses.values()) yield* response.records
   }
 
   snapshot(agent: string): UsageTotals | undefined {
@@ -249,10 +217,11 @@ export class CodexUsageTracker {
   private revision = 0
   private beforeLast?: UsageTotals
   private responses?: UsageLedger
+  private responseSettings = new Map<string, { model: string; effort: string | null }>()
   private prefix?: UsageTotals
   private prefixRecords?: CostRecord[]
 
-  record(info: Record<string, unknown>, model: string, timestamp?: number): void {
+  record(info: Record<string, unknown>, model: string, timestamp?: number, reasoningEffort?: string | null): void {
     if (this.responses) return // legacy token_count mirrors omit compaction calls
     const tokens = normalizeCodexUsage(info.total_token_usage)
     if (!tokens || KEYS.some(key => tokens[key] < this.previous[key])) return
@@ -262,11 +231,11 @@ export class CodexUsageTracker {
     const last = object(info.last_token_usage)
     const requestInput = typeof last.input_tokens === 'number' ? last.input_tokens : delta.inputTokens + delta.cacheReadTokens + delta.cacheWriteTokens
     this.beforeLast = this.ledger.snapshot('orchestrator')
-    this.ledger.record(String(++this.revision), 'orchestrator', model, delta, requestInput, timestamp)
+    this.ledger.record(String(++this.revision), 'orchestrator', model, delta, requestInput, timestamp, undefined, { effort: reasoningEffort })
     this.previous = tokens
   }
 
-  recordResponse(payload: Record<string, unknown>, model: string, timestamp?: number): void {
+  recordResponse(payload: Record<string, unknown>, model: string, timestamp?: number, reasoningEffort?: string | null): void {
     const id = payload.response_id
     const tokens = normalizeCodexUsage(payload.usage)
     if (typeof id !== 'string' || !id || !tokens) return
@@ -288,13 +257,19 @@ export class CodexUsageTracker {
       } else if (total(prior) === 0) this.prefixRecords = []
       this.responses = new UsageLedger()
     }
-    this.responses.record(id, 'orchestrator', typeof payload.model === 'string' ? payload.model : model, tokens, undefined, timestamp)
+    const captured = this.responseSettings.get(id)
+    const responseModel = typeof payload.model === 'string' && payload.model ? payload.model : captured?.model || model
+    const reported = payload.effort ?? payload.reasoning_effort
+    const effort = 'effort' in payload || 'reasoning_effort' in payload ? typeof reported === 'string' ? reported : null
+      : captured?.model === responseModel ? captured.effort : responseModel === model ? reasoningEffort : null
+    this.responseSettings.set(id, { model: responseModel, effort: effort ?? null })
+    this.responses.record(id, 'orchestrator', responseModel, tokens, undefined, timestamp, undefined, { effort })
   }
 
   *costRecords(): IterableIterator<CostRecord> {
     if (!this.responses) { yield* this.ledger.costRecords(); return }
     if (this.prefixRecords) yield* this.prefixRecords
-    else if (this.prefix && (this.prefix.totalTokens > 0 || this.prefix.costUSD === null)) yield { costUSD: this.prefix.costUSD }
+    else if (this.prefix && (this.prefix.totalTokens > 0 || this.prefix.costUSD === null)) yield { costUSD: this.prefix.costUSD, tokens: this.prefix }
     yield* this.responses.costRecords()
   }
 
