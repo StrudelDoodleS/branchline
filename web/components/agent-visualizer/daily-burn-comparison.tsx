@@ -1,98 +1,131 @@
 // Branchline fork modifications; see FORK.md.
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useCostHistory } from '@/hooks/use-cost-history'
-import { compareBurnPeriods, dailyBurnWindows, type BurnSource, type DailyBurnWindows } from '@/hooks/burn-comparison'
+import { compareBurnDays, dayBurnWindows, localDay, shiftDay, type BurnSource, type DayBurnWindow } from '@/hooks/burn-comparison'
 import type { CostHistory, CostHistoryOptions } from '../../../extension/src/cost-history'
 import { costDollar } from './cost-analytics-controls'
 import { curvePath } from '@/hooks/curve-path'
+import { ComparisonDayPicker } from './comparison-day-picker'
 
-const LEFT = 46, RIGHT = 292, TOP = 16, BOTTOM = 186
-const clock = (value: number) => new Date(value).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
-interface Snapshot { scope: string; windows: DailyBurnWindows; today: CostHistory; yesterday: CostHistory }
+const LEFT = 46, RIGHT = 292, TOP = 16, BOTTOM = 186, HOUR = 3600000
+const COLORS = ['#67e8f9', '#c084fc', '#fbbf24', '#4ade80', '#fb7185', '#60a5fa', '#f472b6', '#a3e635']
+const dayName = (day: string, today: string) => day === today ? 'Today' : day === shiftDay(today, -1) ? 'Yesterday'
+  : new Date(`${day}T12:00:00`).toLocaleDateString(undefined, { month: 'short', day: 'numeric', ...(day.slice(0, 4) !== today.slice(0, 4) ? { year: 'numeric' } as const : {}) })
+const elapsedClock = (ms: number) => `${String(Math.floor(ms / HOUR)).padStart(2, '0')}:${String(Math.floor(ms / 60000) % 60).padStart(2, '0')}`
+interface DayResult { key: string; history?: CostHistory; error?: string; retry: () => void }
+interface Snapshot { scope: string; days: { window: DayBurnWindow; history: CostHistory }[] }
+const requestKey = (sessionId: string | null, options: CostHistoryOptions, window: DayBurnWindow) => JSON.stringify([sessionId, options.groupBy ?? 'model', options.group ?? null, window.start, window.end])
 
-export function DailyBurnComparison({ sessionId, options, source, sourceLabel, color, cacheWritesUnknown }: {
-  sessionId: string | null; options: CostHistoryOptions; source: BurnSource; sourceLabel: string; color: string; cacheWritesUnknown: boolean;
+function DayHistory({ sessionId, options, window, enabled, live, onResult }: {
+  sessionId: string | null; options: CostHistoryOptions; window: DayBurnWindow; enabled: boolean; live: boolean;
+  onResult: (day: string, result: DayResult) => void;
 }) {
-  // Refresh the cutoff once a minute. Each request pair has identical duration;
-  // the existing history hook still refreshes usage within that fixed interval.
+  const key = requestKey(sessionId, options, window)
+  const { history, error, isPreviousData, retry } = useCostHistory(enabled && window.end > window.start ? sessionId : null,
+    { groupBy: options.groupBy, group: options.group, resolution: 'hour', range: 'window', fixedWindow: true, start: window.start, end: window.end }, live ? 5000 : null)
+  useEffect(() => {
+    if (enabled) onResult(window.day, { key, history: isPreviousData ? undefined : history, error, retry })
+  }, [enabled, window.day, key, history, isPreviousData, error, retry, onResult])
+  return null
+}
+
+export function DailyBurnComparison({ sessionId, options, source, sourceLabel, cacheWritesUnknown, enabled = true }: {
+  sessionId: string | null; options: CostHistoryOptions; source: BurnSource; sourceLabel: string; cacheWritesUnknown: boolean; enabled?: boolean;
+}) {
   const [cutoff, setCutoff] = useState(() => Math.floor(Date.now() / 60000) * 60000)
   useEffect(() => {
-    const timer = setInterval(() => setCutoff(Math.floor(Date.now() / 60000) * 60000), 60000)
+    if (!enabled) return
+    const refresh = () => setCutoff(Math.floor(Date.now() / 60000) * 60000)
+    refresh()
+    const timer = setInterval(refresh, 60000)
     return () => clearInterval(timer)
-  }, [])
-  const windows = useMemo(() => dailyBurnWindows(cutoff), [cutoff])
-  const scope = JSON.stringify([sessionId, options.groupBy ?? 'model', options.group ?? null, windows.today.start])
-  const active = windows.today.end > windows.today.start ? sessionId : null
-  const query = { groupBy: options.groupBy, group: options.group, resolution: 'hour', range: 'window', fixedWindow: true } as const
-  const today = useCostHistory(active, { ...query, ...windows.today })
-  const yesterday = useCostHistory(active, { ...query, ...windows.yesterday })
-  const [snapshot, setSnapshot] = useState<Snapshot>()
+  }, [enabled])
+  const today = localDay(cutoff)
+  const [chosenSource, setChosenSource] = useState<string | null>(null)
+  const [chosenDays, setChosenDays] = useState<string[] | null>(null)
+  const [matched, setMatched] = useState(false)
   const [selected, setSelected] = useState<number | null>(null)
+  const sourceDay = chosenSource ?? today
+  const dates = useMemo(() => [sourceDay, ...(chosenDays ?? [shiftDay(sourceDay, -1), shiftDay(sourceDay, -2)])].filter((day, i, all) => all.indexOf(day) === i), [sourceDay, chosenDays])
+  const windows = useMemo(() => dayBurnWindows(dates, cutoff, matched), [dates, cutoff, matched])
+  // Date/model/period changes clear the old comparison. Minute refreshes keep
+  // the last complete set until every selected day matches the new cutoff.
+  const scope = JSON.stringify([sessionId, options.groupBy ?? 'model', options.group ?? null, dates, matched, today])
+  const [results, setResults] = useState<Record<string, DayResult>>({})
+  const [snapshot, setSnapshot] = useState<Snapshot>()
+  const onResult = useCallback((day: string, result: DayResult) => setResults(previous => {
+    const old = previous[day]
+    return old?.key === result.key && old.history === result.history && old.error === result.error ? previous : { ...previous, [day]: result }
+  }), [])
+  const complete = windows.length > 0 && windows.every(window => results[window.day]?.key === requestKey(sessionId, options, window) && results[window.day]?.history)
   useEffect(() => {
-    // Keep the last complete pair during refreshes, rather than comparing an
-    // old cutoff on one day with a newly fetched cutoff on the other.
-    if (today.history && yesterday.history && !today.isPreviousData && !yesterday.isPreviousData) {
-      setSnapshot({ scope, windows, today: today.history, yesterday: yesterday.history })
-    }
-  }, [today.history, yesterday.history, today.isPreviousData, yesterday.isPreviousData, scope, windows])
+    if (complete) setSnapshot({ scope, days: windows.map(window => ({ window, history: results[window.day].history! })) })
+  }, [complete, results, scope, windows])
   const data = snapshot?.scope === scope ? snapshot : undefined
-  const comparison = data ? compareBurnPeriods(data.today, data.yesterday, data.windows, source) : null
-  const error = today.error || yesterday.error
-  const unknown = source === 'cacheWrite' && cacheWritesUnknown
-    && comparison?.today.spentUSD === 0 && comparison?.yesterday.spentUSD === 0
-  const duration = data ? data.windows.today.end - data.windows.today.start : 1
-  const index = Math.min(selected ?? Infinity, (comparison?.today.points.length ?? 1) - 1)
-  const current = comparison?.today.points[index], previous = comparison?.yesterday.points[index]
-  const elapsed = current?.elapsedMs ?? duration
+  const comparison = data ? compareBurnDays(data.days, source) : null
+  const errors = windows.map(window => results[window.day]).filter((result, i) => result?.key === requestKey(sessionId, options, windows[i]) && result.error)
+  const unknown = source === 'cacheWrite' && cacheWritesUnknown && comparison?.days.every(day => day.period.spentUSD === 0)
+  const base = comparison?.days[0], reference = comparison?.days[1]
+  const duration = matched ? (base ? base.window.end - base.window.start : 1) : Math.max(24 * HOUR, ...windows.map(window => window.dayEnd - window.start))
   const x = (ms: number) => LEFT + ms / Math.max(1, duration) * (RIGHT - LEFT)
   const y = (value: number) => BOTTOM - value / (comparison?.scaleMax ?? 1) * (BOTTOM - TOP)
-  const through = data ? clock(data.windows.today.end) : clock(windows.today.end)
-  const selectAt = (fraction: number) => {
-    const points = comparison?.today.points
-    if (points?.length) setSelected(points.reduce((best, point, i) => Math.abs(point.elapsedMs - fraction * duration) < Math.abs(points[best].elapsedMs - fraction * duration) ? i : best, 0))
-  }
+  const change = reference?.changePercent
+  const changeText = change === null ? base && base.period.spentUSD > 0 ? 'Up from $0' : 'No recorded spend'
+    : change === undefined ? base ? `${costDollar(base.period.averageUSDPerHour)}/hr` : '—'
+      : Math.abs(change) < 0.05 ? 'Same average burn' : `${Math.abs(change).toFixed(1).replace(/\.0$/, '')}% ${change < 0 ? 'lower' : 'higher'}`
+  const inspect = (fraction: number) => setSelected(Math.max(0, Math.min(duration, fraction * duration)))
 
-  return <section aria-label="Daily burn comparison" className="mt-4 text-sm">
-    <h5 className="sr-only">{sourceLabel} · today vs yesterday</h5>
-    <p className="text-xs text-slate-400">Today vs yesterday · midnight to {through}</p>
-    {error && <div className="mt-2 text-amber-200"><p>{data ? 'Could not refresh the comparison; showing the last complete pair.' : error}</p>
-      <button type="button" aria-label="Retry daily burn comparison" onClick={() => { today.retry(); yesterday.retry() }} className="mt-1 min-h-11 rounded border border-slate-500 px-2">Retry comparison</button></div>}
-    {!active ? <p className="mt-2 text-slate-300">The comparison starts after the first minute of today.</p>
-      : !data && !error ? <p className="mt-2 text-slate-300">Loading both days…</p>
-        : data && !comparison ? <p className="mt-2 text-amber-200">Pricing or matching time data is unavailable for this comparison.</p>
-          : unknown ? <p className="mt-2 text-amber-200">Cache-write burn is unknown for these Codex logs. A missing write count cannot be compared as zero spending.</p>
+  return <section aria-label="Daily burn comparison" className="text-sm">
+    <ComparisonDayPicker sourceDay={sourceDay} days={dates.slice(1)} today={today} matched={matched}
+      onSource={day => { setChosenSource(day === today ? null : day); setChosenDays(null); setSelected(null) }}
+      onDays={days => { setChosenDays(days); setSelected(null) }} onMatched={value => { setMatched(value); setSelected(null) }} />
+    {windows.map(window => <DayHistory key={window.day} sessionId={sessionId} options={options} window={window} enabled={enabled && !!sessionId}
+      live={window.day === today} onResult={onResult} />)}
+    <p className="mt-3 text-xs leading-relaxed text-slate-400">{matched ? 'Equal elapsed time from local midnight.' : dates.includes(today) ? 'Full days · today stops at now.' : 'Full calendar days · local midnight to midnight.'}</p>
+    {!!errors.length && <div className="mt-2 text-amber-200"><p>{data ? 'Could not refresh all days; showing the last complete comparison.' : 'Could not load all selected days.'}</p>
+      <button type="button" aria-label="Retry daily burn comparison" onClick={() => errors.forEach(result => result.retry())} className="mt-1 min-h-11 rounded border border-slate-500 px-2">Retry comparison</button></div>}
+    {windows.some(window => window.end <= window.start) ? <p className="mt-3 text-slate-300">The comparison starts after the first minute of today.</p>
+      : !data && !errors.length ? <p className="mt-3 text-slate-300">Loading selected days…</p>
+        : data && !comparison ? <p className="mt-3 text-amber-200">Pricing or matching time data is unavailable for this comparison.</p>
+          : unknown ? <p className="mt-3 text-amber-200">Cache-write burn is unknown for these Codex logs. A missing write count cannot be compared as zero spending.</p>
             : comparison && <>
-              <p aria-label="Daily burn change" className="mt-4 text-3xl font-semibold tracking-tight" style={{ color: comparison.changePercent !== null && comparison.changePercent < 0 ? '#86efac' : '#e2e8f0' }}>
-                {comparison.changePercent === null ? comparison.today.spentUSD > 0 ? 'Up from $0 yesterday' : 'No recorded spend in either period'
-                  : Math.abs(comparison.changePercent) < 0.05 ? 'Same average burn'
-                    : `${Math.abs(comparison.changePercent).toFixed(1).replace(/\.0$/, '')}% ${comparison.changePercent < 0 ? 'lower' : 'higher'}`}
-              </p>
-              {comparison.changePercent !== null && <p className="mt-1 text-sm text-slate-400">average burn</p>}
+              <p aria-label="Daily burn change" className="mt-4 text-3xl font-semibold tracking-tight" style={{ color: change !== null && change !== undefined && change < 0 ? '#86efac' : '#e2e8f0' }}>{changeText}</p>
+              <p className="mt-1 text-sm text-slate-400">{reference ? `${dayName(sourceDay, today)} average burn vs ${dayName(reference.window.day, today)}` : `${dayName(sourceDay, today)} average burn`}</p>
               {source === 'cacheWrite' && cacheWritesUnknown && <p className="mt-2 text-xs text-amber-200">Reported writes only · Codex writes unknown.</p>}
-              <div className="mt-5 grid grid-cols-2 gap-4 text-slate-300">
-                <div><span className="block text-xs" style={{ color }}>Today · solid</span><output aria-label="Today average burn" className="mt-1 block text-lg font-medium text-slate-100">{costDollar(comparison.today.averageUSDPerHour)}<span className="text-sm font-normal text-slate-400">/hr</span></output></div>
-                <div><span className="block text-xs text-slate-400">Yesterday · dashed</span><output aria-label="Yesterday average burn" className="mt-1 block text-lg font-medium text-slate-300">{costDollar(comparison.yesterday.averageUSDPerHour)}<span className="text-sm font-normal text-slate-400">/hr</span></output></div>
-              </div>
-              <svg role="img" aria-label="Today and yesterday burn rate" tabIndex={0} viewBox="0 0 300 220" className="mt-2 block w-full rounded focus-visible:outline focus-visible:outline-cyan-300" style={{ touchAction: 'pan-y' }}
-                onClick={event => { const box = event.currentTarget.getBoundingClientRect(); selectAt(Math.max(0, Math.min(1, (event.clientX - box.left - LEFT / 300 * box.width) / ((RIGHT - LEFT) / 300 * box.width)))) }}
-                onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); setSelected(Math.max(0, Math.min(comparison.today.points.length - 1, index + (event.key === 'ArrowLeft' ? -1 : 1)))) } }}>
-                <title>{sourceLabel} dollar burn, today and yesterday</title>
-                <desc>Both days use the same elapsed hours since midnight and the same vertical dollar scale. Solid is today, dashed is yesterday. Tap or use left and right arrows to inspect.</desc>
+              <svg role="img" aria-label="Daily burn rate comparison" tabIndex={0} viewBox="0 0 300 220" className="mt-3 block w-full rounded focus-visible:outline focus-visible:outline-cyan-300" style={{ touchAction: 'pan-y' }}
+                onClick={event => { const box = event.currentTarget.getBoundingClientRect(); inspect((event.clientX - box.left - LEFT / 300 * box.width) / ((RIGHT - LEFT) / 300 * box.width)) }}
+                onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); inspect(((selected ?? duration) + (event.key === 'ArrowLeft' ? -HOUR : HOUR)) / duration) } }}>
+                <title>{sourceLabel} dollar burn by day</title>
+                <desc>Selected calendar days share one dollar scale and an elapsed-hours axis from local midnight. Each day has a separate smooth coloured line. Today ends at the latest cutoff. Tap or use left and right arrows to inspect.</desc>
                 {[0, 0.5, 1].map(fraction => <g key={fraction}><line x1={LEFT} x2={RIGHT} y1={y(comparison.scaleMax * fraction)} y2={y(comparison.scaleMax * fraction)} stroke="#334155" /><text x="2" y={y(comparison.scaleMax * fraction) + 4} fill="#cbd5e1" fontSize="9">{costDollar(comparison.scaleMax * fraction)}</text></g>)}
-                {(['yesterday', 'today'] as const).map(period => <path key={period} data-period={period} data-scale-max={comparison.scaleMax}
-                  d={curvePath(comparison[period].points.map(point => ({ x: x(point.elapsedMs), y: y(point.rateUSDPerHour) })))}
-                  fill="none" stroke={period === 'today' ? color : '#cbd5e1'} strokeWidth={period === 'today' ? 2.5 : 2} strokeDasharray={period === 'yesterday' ? '6 4' : undefined} />)}
-                {selected !== null && <line x1={x(elapsed)} x2={x(elapsed)} y1={TOP} y2={BOTTOM} stroke="#67e8f9" strokeDasharray="3 3" />}
-                <text x={LEFT} y="211" fill="#cbd5e1" fontSize="10">00:00</text><text x={RIGHT} y="211" textAnchor="end" fill="#cbd5e1" fontSize="10">{through}</text>
+                {[...comparison.days].reverse().map(day => {
+                  const index = dates.indexOf(day.window.day)
+                  return <path key={day.window.day} data-day={day.window.day} data-baseline={index === 0} data-scale-max={comparison.scaleMax}
+                    data-window-start={day.window.start} data-window-end={day.window.end}
+                    d={curvePath(day.period.points.map(point => ({ x: x(point.elapsedMs), y: y(point.rateUSDPerHour) })))}
+                    fill="none" stroke={COLORS[index]} strokeWidth={index === 0 ? 2.8 : 2.2} strokeLinecap="round" strokeLinejoin="round" />
+                })}
+                {selected !== null && <line x1={x(selected)} x2={x(selected)} y1={TOP} y2={BOTTOM} stroke="#e2e8f0" strokeDasharray="3 3" />}
+                {[0, .25, .5, .75, 1].map(fraction => <text key={fraction} x={x(duration * fraction)} y="211" textAnchor={fraction === 0 ? 'start' : fraction === 1 ? 'end' : 'middle'} fill="#cbd5e1" fontSize="10">{elapsedClock(duration * fraction)}</text>)}
               </svg>
-              {selected !== null && <p className="mt-2 text-xs text-slate-300">{clock(data!.windows.today.start + elapsed)} · today {costDollar(current?.rateUSDPerHour ?? 0)}/hr · yesterday {costDollar(previous?.rateUSDPerHour ?? 0)}/hr</p>}
-              <details className="mt-3 border-t border-slate-700 pt-1 text-xs text-slate-400">
+              {selected !== null && <p className="mt-2 text-xs text-slate-400">At {elapsedClock(selected)} since midnight</p>}
+              <div aria-label="Comparison day colours" className={`mt-3 grid gap-x-3 gap-y-3 ${comparison.days.length <= 3 ? 'grid-cols-3' : 'grid-cols-2'}`}>
+                {comparison.days.map((day, i) => {
+                  const point = selected !== null && selected <= day.window.end - day.window.start ? day.period.points.findLast(point => point.elapsedMs <= selected) : undefined
+                  const value = selected === null ? day.period.averageUSDPerHour : point?.rateUSDPerHour
+                  return <div key={day.window.day} className="min-w-0">
+                    <span className="flex items-center gap-1.5 text-xs" style={{ color: COLORS[i] }}><span aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full" style={{ background: COLORS[i] }} />{dayName(day.window.day, today)}{i === 0 ? ' · source' : ''}</span>
+                    <output aria-label={`${day.window.day} ${selected === null ? 'average' : 'selected'} burn`} className="mt-1 block text-base tabular-nums text-slate-100">{value === undefined ? '—' : costDollar(value)}{value !== undefined && <span className="text-sm text-slate-400">/hr</span>}</output>
+                  </div>
+                })}
+              </div>
+              <details className="mt-4 border-t border-slate-700 pt-1 text-xs text-slate-400">
                 <summary className="min-h-11 cursor-pointer content-center text-sm text-slate-300">Comparison details</summary>
-                <p className="leading-relaxed">Equal elapsed time since local midnight. Both lines share one scale. Hourly averages include idle time; the unfinished hour uses the same duration on both days. Curves join the original values without changing costs.</p>
-                <p className="mt-3 text-slate-300">Today {costDollar(comparison.today.spentUSD)} spent · yesterday {costDollar(comparison.yesterday.spentUSD)} spent.</p>
-                <input type="range" aria-label="Inspect daily burn" min={0} max={comparison.today.points.length - 1} value={index} onChange={event => setSelected(Number(event.target.value))} className="block h-11 w-full accent-cyan-300" />
+                <p className="leading-relaxed">Each line shows hourly burn for its own calendar day. Full days include idle time; today ends at the current minute. Same time compares equal elapsed hours on every day. Percentages compare average dollars per hour. Curves join original values without changing costs. Clock changes can make a day 23 or 25 elapsed hours long.</p>
+                <ul className="mt-3 space-y-2 text-slate-300">{comparison.days.map(day => <li key={day.window.day}>{day.window.day}: {costDollar(day.period.spentUSD)} over {((day.window.end - day.window.start) / HOUR).toFixed(2)} hours.</li>)}</ul>
+                <input type="range" aria-label="Inspect daily burn" min={0} max={duration} step={60000} value={selected ?? duration} onChange={event => setSelected(Number(event.target.value))} className="mt-2 block h-11 w-full accent-cyan-300" />
               </details>
             </>}
   </section>

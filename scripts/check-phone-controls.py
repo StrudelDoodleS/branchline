@@ -469,6 +469,7 @@ async def cost_history_retry(page):
     panel = page.get_by_role('region', name='Session API costs')
     await panel.get_by_role('button', name='Retry cost history', exact=True).click()
     await expect(panel.get_by_text('No dated usage yet.', exact=True)).to_be_visible()
+    await panel.get_by_role('tab',name='Burn',exact=True).click()
     await expect(panel.get_by_label('Chart headline',exact=True)).to_have_text('—')
     await expect(panel).to_contain_text('$2.50 has no recorded timestamp')
     await expect(panel.get_by_role('img', name='API cost over time', exact=True, include_hidden=True)).to_have_count(0)
@@ -650,18 +651,26 @@ async def cost_readable_layout(page):
                    burnRate=dict(bucketMs=60000,endTimestamp=start+3600000,points=[
                        dict(timestamp=start+i*60000,costUSDPerMinute=value,breakdownUSDPerMinute=dict(zero,input=value))
                        for i,value in enumerate([0.1,0.2,0.05,0.12]+[0.06]*56+[0.17])]))
-    await page.route('**/session-cost-history?*', lambda route: route.fulfill(status=200,content_type='application/json',body=json.dumps(dict(sessionId='phone-primary',history=history))))
+    async def history_route(route):
+        query=parse_qs(urlparse(route.request.url).query)
+        h=history
+        if query.get('fixedWindow')==['true']:
+            start,end=int(query['start'][0]),int(query['end'][0])
+            h=dict(history,window=dict(start=start,end=end,startCostUSD=0,startBreakdownUSD=zero),
+                   burnRate=dict(bucketMs=3600000,endTimestamp=end,points=[dict(timestamp=timestamp,costUSDPerMinute=0.1,breakdownUSDPerMinute=dict(zero,input=0.1)) for timestamp in range(start,end,3600000)]))
+        await route.fulfill(status=200,content_type='application/json',body=json.dumps(dict(sessionId='phone-primary',history=h)))
+    await page.route('**/session-cost-history?*',history_route)
     await page.get_by_role('button',name='$Cost',exact=True).click()
     panel = page.get_by_role('region',name='Session API costs')
     assert await panel.evaluate('element=>element.contains(document.activeElement)'), 'Focus must enter the cost view'
-    await expect(panel.get_by_role('tab',name='Burn',exact=True)).to_have_attribute('aria-selected','true')
+    await expect(panel.get_by_role('tab',name='Compare',exact=True)).to_have_attribute('aria-selected','true')
     await expect(panel.get_by_role('img')).to_have_count(1)
-    await expect(panel.get_by_role('img',name='API dollar burn rate',exact=True, include_hidden=True)).to_be_visible()
+    await expect(panel.get_by_role('img',name='Daily burn rate comparison',exact=True)).to_be_visible()
     await expect(panel.get_by_role('combobox',name='Burn rate source',exact=True)).to_have_value('total')
     await expect(panel.get_by_role('combobox',name='Group costs by',exact=True)).to_have_count(0)
     await expect(panel.get_by_role('table',name='Cost and burn rate by source')).to_have_count(0)
     await expect(panel.get_by_role('region',name='Cache reuse',exact=True)).to_have_count(0)
-    path = panel.get_by_role('img').locator('path[data-source="total"]')
+    path = panel.get_by_role('img').locator('path[data-baseline="true"]')
     assert 'C' in await path.get_attribute('d')
     await panel.get_by_role('tab',name='Spend',exact=True).click()
     await expect(panel.get_by_role('img')).to_have_count(1)
@@ -687,6 +696,97 @@ async def cost_readable_layout(page):
     await page.keyboard.press('Escape')
     await expect(panel).to_have_count(0)
     await expect(page.get_by_role('button',name='$Cost',exact=True)).to_be_focused()
+
+
+async def cost_multi_day_comparison(page):
+    hour = 3600000
+    await page.clock.install()
+    cutoff = await page.evaluate('new Date(2026,9,21,10,30).getTime()')
+    midnight = await page.evaluate('new Date(2026,9,21).getTime()')
+    await page.evaluate('value => { window.__burnNow=value; Date.now=()=>window.__burnNow }', cutoff)
+    zero = dict(input=0,output=0,cacheRead=0,cacheWrite=0,unattributed=0)
+    requests = []
+    blocked_day = None
+    async def history_route(route):
+        query = parse_qs(urlparse(route.request.url).query)
+        requests.append(query)
+        fixed = query.get('fixedWindow') == ['true']
+        start,end = (int(query['start'][0]),int(query['end'][0])) if fixed else (midnight,cutoff)
+        if fixed and start == blocked_day:
+            await route.fulfill(status=503,body='temporarily unavailable')
+            return
+        rate = (2 + (midnight-start)//(24*hour)*2)*(2 if query.get('group') else 1)
+        rates = []
+        timestamp = start
+        while timestamp < end:
+            charge = rate*min(hour,end-timestamp)/hour
+            rates.append(dict(timestamp=timestamp,costUSDPerMinute=charge/60,breakdownUSDPerMinute=dict(zero,input=charge/60)))
+            timestamp += hour
+        h = dict(points=[dict(timestamp=start,costUSD=1,breakdownUSD=dict(zero,input=1)),dict(timestamp=end,costUSD=21,breakdownUSD=dict(zero,input=21))],
+                 totalCostUSD=21,unpricedResponses=0,untimedCostUSD=0,groups=[dict(id='["claude-opus-5-5",null]',model='claude-opus-5-5',records=1,
+                    tokens=dict(inputTokens=100,outputTokens=100,cacheReadTokens=0,cacheWriteTokens=0,cacheWrite1hTokens=0,reasoningTokens=0),
+                    totalTokens=200,costUSD=21,knownCostUSD=21,breakdownUSD=dict(zero,input=21),averageCostUSDPerMinute=0.1)],
+                 window=dict(start=start,end=end,startCostUSD=0,startBreakdownUSD=zero),
+                 bounds=dict(start=midnight-10*24*hour,end=cutoff),
+                 burnRate=dict(bucketMs=hour,endTimestamp=end,points=rates))
+        await route.fulfill(status=200,content_type='application/json',body=json.dumps(dict(sessionId='phone-primary',history=h)))
+    await page.route('**/session-cost-history?*',history_route)
+    await page.get_by_role('button',name='$Cost',exact=True).click()
+    panel=page.get_by_role('region',name='Session API costs')
+    await expect(panel.get_by_role('tab',name='Compare',exact=True)).to_have_attribute('aria-selected','true')
+    daily=panel.get_by_role('region',name='Daily burn comparison',exact=True)
+    chart=daily.get_by_role('img',name='Daily burn rate comparison',exact=True)
+    await expect(chart).to_be_visible()
+    await expect(chart.locator('path[data-day]')).to_have_count(3)
+    await expect(daily.get_by_role('button',name='Full days',exact=True)).to_have_attribute('aria-pressed','true')
+    paths=await chart.locator('path[data-day]').evaluate_all("ps=>ps.map(p=>({day:p.dataset.day,end:+p.dataset.windowEnd,scale:p.dataset.scaleMax,color:p.getAttribute('stroke'),dash:p.getAttribute('stroke-dasharray'),d:p.getAttribute('d')}))")
+    assert len(set(p['color'] for p in paths))==3
+    assert len(set(p['scale'] for p in paths))==1
+    assert all('C' in p['d'] and not p['dash'] for p in paths)
+    assert next(p for p in paths if p['day']=='2026-10-21')['end']==cutoff
+    assert next(p for p in paths if p['day']=='2026-10-20')['end']==midnight
+    await expect(daily.get_by_label('Source day',exact=True)).to_have_value('2026-10-21')
+    await daily.get_by_role('button',name='Compare days',exact=True).click()
+    await daily.get_by_label('First comparison date',exact=True).fill('2026-10-16')
+    await daily.get_by_label('Last comparison date',exact=True).fill('2026-10-18')
+    await daily.get_by_role('button',name='Add days',exact=True).click()
+    await expect(chart.locator('path[data-day]')).to_have_count(6)
+    await daily.get_by_role('button',name='Done choosing days',exact=True).click()
+    await daily.get_by_role('button',name='Same time',exact=True).click()
+    await expect(chart.locator('path[data-day="2026-10-20"]')).to_have_attribute('data-window-end',str(midnight-24*hour+10.5*hour).removesuffix('.0'))
+    await panel.get_by_role('tab',name='Spend',exact=True).click()
+    await panel.get_by_role('tab',name='Compare',exact=True).click()
+    await expect(chart.locator('path[data-day]')).to_have_count(6)
+    await daily.get_by_label('Source day',exact=True).fill('2026-10-18')
+    await expect(chart.locator('path[data-day][data-baseline="true"]')).to_have_attribute('data-day','2026-10-18')
+    await expect(chart.locator('path[data-day]')).to_have_count(3)
+    await expect(chart.locator('path[data-day="2026-10-21"]')).to_have_count(0)
+    await daily.get_by_role('button',name='Full days',exact=True).click()
+    await expect(chart.locator('path[data-day="2026-10-18"]')).to_have_attribute('data-window-end',str(midnight-2*24*hour))
+    # A changed model must reload all days, preserve chosen dates, and recover
+    # a single failed day without pairing it with the previous model's series.
+    blocked_day = midnight-4*24*hour
+    await panel.get_by_role('button',name='Cost filters',exact=True).click()
+    await panel.locator('button[title="claude-opus-5-5"]').click()
+    await expect(daily.get_by_role('button',name='Retry daily burn comparison',exact=True)).to_be_visible()
+    await expect(chart).to_have_count(0)
+    await expect(daily.get_by_label('Source day',exact=True)).to_have_value('2026-10-18')
+    blocked_day = None
+    await daily.get_by_role('button',name='Retry daily burn comparison',exact=True).click()
+    await expect(chart.locator('path[data-baseline="true"]')).to_have_attribute('data-day','2026-10-18')
+    await expect(chart.locator('path[data-baseline="true"]')).to_have_attribute('data-scale-max','24')
+    await panel.get_by_role('button',name='Cost filters',exact=True).click()
+    assert all(q.get('resolution')==['hour'] for q in requests if q.get('fixedWindow')==['true'])
+    requests.clear()
+    await page.clock.fast_forward(15000)
+    await expect(chart.locator('path[data-baseline="true"]')).to_have_attribute('data-scale-max','24')
+    assert not any(q.get('fixedWindow')==['true'] for q in requests),'Completed days should not refresh every five seconds'
+    assert await page.evaluate('document.documentElement.scrollWidth<=innerWidth')
+    for control in [daily.get_by_label('Source day',exact=True),daily.get_by_role('button',name='Compare days',exact=True),daily.get_by_role('button',name='Full days',exact=True)]:
+        box=await control.bounding_box()
+        assert box and box['height']>=44 and box['x']>=0 and box['x']+box['width']<=page.viewport_size['width'],box
+    if page.viewport_size['width']==390:
+        await page.screenshot(path='/tmp/branchline-multi-day-phone.png')
 
 
 async def cost_burn_trends(page):
@@ -742,12 +842,13 @@ async def cost_burn_trends(page):
     assert box['height'] >= 190, box
     await panel.get_by_role('combobox', name='Burn rate view', exact=True).select_option('daily')
     daily = panel.get_by_role('region', name='Daily burn comparison', exact=True)
+    await daily.get_by_role('button',name='Same time',exact=True).click()
     await expect(daily).to_contain_text('50% lower')
     await expect(daily).to_contain_text('$21.00')
     await expect(daily).to_contain_text('$42.00')
-    await expect(daily.get_by_role('img',name='Today and yesterday burn rate',exact=True)).to_be_visible()
-    await expect(daily.locator('path[data-period="today"]')).to_have_attribute('data-scale-max','4')
-    await expect(daily.locator('path[data-period="yesterday"]')).to_have_attribute('data-scale-max','4')
+    await expect(daily.get_by_role('img',name='Daily burn rate comparison',exact=True)).to_be_visible()
+    await expect(daily.locator('path[data-day="2026-10-21"]')).to_have_attribute('data-scale-max','4')
+    await expect(daily.locator('path[data-day="2026-10-20"]')).to_have_attribute('data-scale-max','4')
     if page.viewport_size['width'] == 390:
         await daily.scroll_into_view_if_needed()
         await page.screenshot(path='/tmp/branchline-burn-trends-phone.png')
@@ -756,7 +857,7 @@ async def cost_burn_trends(page):
     try:
         await page.evaluate('value => { window.__burnNow = value }', midnight+24*hour+120000)
         await page.clock.fast_forward(60000)
-        await expect(daily).to_contain_text('Loading both days')
+        await expect(daily).to_contain_text('Loading selected days')
         await expect(daily.get_by_role('img')).to_have_count(0)
     finally:
         rollover.set()
@@ -1342,7 +1443,7 @@ async def main():
             launch["executable_path"] = os.environ["PLAYWRIGHT_CHROMIUM_EXECUTABLE"]
         browser = await playwright.chromium.launch(**launch)
         for width in [360, 390, 1280]:
-            for check in [tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, agent_status_filters, cost_history_graph, cost_history_retry, cost_burn_breakdown, cost_burn_trends, cost_readable_layout, agent_model_settings, cost_model_analytics, cost_cache_reuse, cost_cache_write_unknown, cost_time_views, cost_phone_gestures, cost_history_pending_queries]:
+            for check in [tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, agent_status_filters, cost_history_graph, cost_history_retry, cost_burn_breakdown, cost_burn_trends, cost_multi_day_comparison, cost_readable_layout, agent_model_settings, cost_model_analytics, cost_cache_reuse, cost_cache_write_unknown, cost_time_views, cost_phone_gestures, cost_history_pending_queries]:
                 if requested and check.__name__ not in requested:
                     continue
                 context = await browser.new_context(viewport=dict(width=width, height=844), is_mobile=width < 640, has_touch=width < 640)

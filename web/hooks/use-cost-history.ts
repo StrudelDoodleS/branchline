@@ -1,7 +1,7 @@
 // Branchline fork modifications; see FORK.md.
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { vscodeBridge } from '@/lib/vscode-bridge'
 import type { CostHistory, CostHistoryOptions } from '../../extension/src/token-usage'
 
@@ -37,7 +37,7 @@ async function requestHistory(sessionId: string, options: CostHistoryOptions, si
   return data.history
 }
 
-export function useCostHistory(sessionId: string | null, options: CostHistoryOptions = {}) {
+export function useCostHistory(sessionId: string | null, options: CostHistoryOptions = {}, refreshMs: number | null = 5000) {
   const queryKey = JSON.stringify(options)
   // A different range can preview the loaded series. A different session,
   // model filter or bucket resolution must never reuse that series.
@@ -66,16 +66,17 @@ export function useCostHistory(sessionId: string | null, options: CostHistoryOpt
         if (active) setState(previous => ({ ...previous, error: error instanceof Error ? error.message : 'Could not load cost history.', loading: false }))
       } finally {
         clearTimeout(timeout)
-        if (active) timer = setTimeout(load, 5000)
+        if (active && refreshMs !== null) timer = setTimeout(load, refreshMs)
       }
     }
     void load()
     return () => { active = false; clearTimeout(timer); controller?.abort() }
-  }, [sessionId, scopeKey, queryKey, attempt])
+  }, [sessionId, scopeKey, queryKey, attempt, refreshMs])
+  const retry = useCallback(() => setAttempt(value => value + 1), [])
   const compatible = state.sessionId === sessionId && state.scopeKey === scopeKey
   const current = compatible && state.queryKey === queryKey
   return { history: compatible ? state.history : undefined,
     isPreviousData: compatible && !!state.history && state.historyQueryKey !== queryKey,
     loading: !!sessionId && (!current || !!state.loading),
-    error: current ? state.error : undefined, retry: () => setAttempt(value => value + 1) }
+    error: current ? state.error : undefined, retry }
 }

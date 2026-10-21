@@ -100,8 +100,8 @@ export function CostHistoryChart({ sessionId }: { sessionId: string | null }) {
   const [overlay, setOverlay] = useState(true)
   const [preview, setPreview] = useState<CostTimeWindow | null>(null)
   const [burnSource, setBurnSource] = useState<'all' | BurnSource>('total')
-  const [burnView, setBurnView] = useState<'lines' | 'bars' | 'daily'>('lines')
-  const [view, setView] = useState<'spend' | 'burn' | 'compare'>('burn')
+  const [burnView, setBurnView] = useState<'lines' | 'bars' | 'daily'>('daily')
+  const [view, setView] = useState<'spend' | 'burn' | 'compare'>('compare')
   const [filters, setFilters] = useState(false)
   const [chartDetails, setChartDetails] = useState(false)
   const [reuseDetails, setReuseDetails] = useState(false)
@@ -236,10 +236,12 @@ export function CostHistoryChart({ sessionId }: { sessionId: string | null }) {
             <span key={source.key} className="inline-flex items-center gap-1.5"><span aria-hidden="true" className="h-2 w-2 rounded-full" style={{ background: source.color }} />{source.label}</span>)}
         </div>}
       </div>
-      <div hidden={view !== 'compare'} id="cost-panel-compare" role="tabpanel" aria-labelledby="cost-tab-compare">
-        {view === 'compare' && <DailyBurnComparison sessionId={sessionId} options={options} source={burnSource === 'all' ? 'total' : burnSource}
-          sourceLabel={SOURCES.find(source => source.key === burnSource)?.label ?? 'Total'} color={SOURCES.find(source => source.key === burnSource)?.color ?? '#67e8f9'} cacheWritesUnknown={!!codexZeroWrites} />}
-      </div>
+    </>}
+    <div hidden={view !== 'compare' || unavailable} id="cost-panel-compare" role="tabpanel" aria-labelledby="cost-tab-compare">
+      <DailyBurnComparison sessionId={sessionId} options={options} source={burnSource === 'all' ? 'total' : burnSource} enabled={view === 'compare' && !!history && !unavailable}
+        sourceLabel={SOURCES.find(source => source.key === burnSource)?.label ?? 'Total'} cacheWritesUnknown={!!codexZeroWrites} />
+    </div>
+    {!unavailable && first && last && <>
       <details open={chartDetails} onToggle={event => setChartDetails(event.currentTarget.open)} className="mt-4 border-t border-slate-700 pt-1">
         <summary className="min-h-11 cursor-pointer content-center text-sm text-slate-300">Chart details</summary>
         <p className="mt-2 text-xs leading-relaxed text-slate-400">{date(start)} – {date(end)}. Pinch to zoom · drag sideways to pan · tap to inspect. Total resets. Cumulative cost includes earlier usage.</p>
@@ -247,7 +249,7 @@ export function CostHistoryChart({ sessionId }: { sessionId: string | null }) {
         <div className="mt-3 grid grid-cols-2 gap-2">
           <button type="button" aria-label="Cost breakdown" aria-pressed={overlay} onClick={() => setOverlay(value => !value)} className="min-h-11 rounded-lg border border-slate-600 text-sm">Breakdown</button>
           <select aria-label="Burn rate view" value={burnView} onChange={event => { const next = event.target.value as typeof burnView; setBurnView(next); setView(next === 'daily' ? 'compare' : 'burn') }} className="min-h-11 min-w-0 rounded-lg border border-slate-600 bg-slate-900 px-2 text-sm">
-            <option value="lines">Rate lines</option><option value="bars">Stacked bars</option><option value="daily">Today / yesterday</option>
+            <option value="lines">Rate lines</option><option value="bars">Stacked bars</option><option value="daily">Compare days</option>
           </select>
         </div>
         <input type="range" aria-label="Inspect cost history" min={0} max={points.length - 1} step={1} value={selectedIndex} disabled={points.length < 2}
