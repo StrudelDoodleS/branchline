@@ -35,6 +35,103 @@ def recording():
     ])
 
 
+def session_picker(page):
+    return page.locator('button[aria-label="Browse sessions"]')
+
+
+async def choose_session(page, session_id):
+    panel = page.get_by_role('dialog', name='Sessions', exact=True)
+    costs = page.get_by_role('region', name='Session API costs', exact=True)
+    reopen_costs = await costs.is_visible() and page.viewport_size['width'] < 640
+    if reopen_costs:
+        await costs.get_by_role('button', name='Close API costs', exact=True).click()
+    if not await panel.is_visible():
+        await session_picker(page).click()
+    choice = panel.locator(f'button[data-session-choice="{session_id}"]')
+    await expect(choice).to_have_count(1)
+    group = choice.locator('xpath=ancestor::li[@data-session-group]')
+    toggle = group.locator('button[data-session-group-toggle]')
+    if await toggle.get_attribute('aria-expanded') == 'false':
+        await toggle.click()
+    await choice.click()
+    await expect(panel).to_have_count(0)
+    if reopen_costs and not await costs.is_visible():
+        await page.get_by_role('button', name='$Cost', exact=True).click()
+
+
+async def session_picker_accordion(page):
+    await expect(session_picker(page)).to_have_accessible_description('Solver review')
+    old_time = await page.evaluate('new Date(2026,9,1,14).getTime()')
+    saved = [dict(id='old-claude', label='Editor specification with a long readable title', status='completed', startTime=old_time,
+                  lastActivityTime=old_time, runtime='claude', provider='anthropic', historical=True, project='superglm'),
+             dict(id='old-codex', label='Inference suite', status='completed', startTime=old_time,
+                  lastActivityTime=old_time, runtime='codex', provider='openai', historical=True, project='superlss')]
+    await page.route('**/session-catalog*', lambda route: route.fulfill(status=200, content_type='application/json', body=json.dumps(dict(sessions=saved))))
+    await session_picker(page).click()
+    panel = page.get_by_role('dialog', name='Sessions', exact=True)
+    await expect(panel).to_be_visible()
+    await expect(panel.get_by_role('button', name='Close sessions', exact=True)).to_be_focused()
+    await expect(panel.get_by_role('combobox')).to_have_count(0)
+    await expect(panel.get_by_label('Session matches', exact=True)).to_contain_text('4 sessions')
+    recent = panel.locator('li[data-session-group="recent"]')
+    toggle = recent.locator('button[data-session-group-toggle]')
+    await expect(toggle).to_contain_text('Active')
+    await expect(toggle).to_contain_text('last 24 hours')
+    await expect(toggle).to_have_attribute('aria-expanded', 'false')
+    await toggle.click()
+    await expect(recent.locator('[data-session-choice]').first).to_have_attribute('data-session-choice', 'phone-primary')
+    await expect(recent.locator('[data-session-choice]').last).to_have_attribute('data-session-choice', 'phone-other')
+    await expect(recent.locator('[data-session-choice="phone-primary"]')).to_have_attribute('aria-current', 'true')
+    dated = panel.locator('li[data-session-group="2026-10-01"]')
+    await expect(dated.locator('[data-session-choice="old-claude"]')).to_be_hidden()
+    await dated.locator('button[data-session-group-toggle]').click()
+    await expect(dated.locator('[data-session-choice="old-claude"]')).to_be_visible()
+    await panel.get_by_role('button', name='Anthropic', exact=True).click()
+    await panel.get_by_role('searchbox', name='Search sessions', exact=True).fill('SUPERGLM')
+    await expect(panel.get_by_label('Session matches', exact=True)).to_contain_text('1 session')
+    await expect(panel.locator('[data-session-choice="old-codex"]')).to_have_count(0)
+    await expect(panel.locator('[data-session-choice="old-claude"]')).to_be_visible()
+    await panel.get_by_role('searchbox', name='Search sessions', exact=True).fill('no such project')
+    await expect(panel.get_by_text('No sessions match your search.', exact=True)).to_be_visible()
+    await panel.get_by_role('button', name='Clear filters', exact=True).click()
+    await expect(panel.get_by_label('Session matches', exact=True)).to_contain_text('4 sessions')
+    for button in [toggle, panel.get_by_role('button', name='All', exact=True), panel.get_by_role('button', name='Close sessions', exact=True)]:
+        box = await button.bounding_box()
+        assert box and box['width'] >= 44 and box['height'] >= 44, f'Small session touch target: {box}'
+    assert await panel.evaluate('element=>element.scrollWidth<=element.clientWidth'), 'Session panel scrolls sideways'
+    assert await page.evaluate('document.documentElement.scrollWidth<=innerWidth')
+    await page.keyboard.press('Escape')
+    await expect(panel).to_have_count(0)
+    await expect(session_picker(page)).to_be_focused()
+    await choose_session(page, 'phone-other')
+    await expect(session_picker(page)).to_have_attribute('data-session-id', 'phone-other')
+
+
+async def session_picker_live_focus(page):
+    await page.evaluate('window.__phoneEventSources.forEach(source=>source.close())')
+    now = await page.evaluate('Date.now()')
+    sessions = [dict(id='phone-primary', label='Solver review', status='active', startTime=now, lastActivityTime=now),
+                dict(id='phone-other', label='Other project', status='completed', startTime=now-2*86400000, lastActivityTime=now-2*86400000)]
+    await page.route('**/session-catalog*', lambda route: route.fulfill(status=200, content_type='application/json', body='{"sessions":[]}'))
+    await page.evaluate("sessions=>window.postMessage({type:'session-list',sessions},'*')", sessions)
+    await session_picker(page).click()
+    panel=page.get_by_role('dialog',name='Sessions',exact=True)
+    choice=panel.locator('button[data-session-choice="phone-other"]')
+    group=choice.locator('xpath=ancestor::li[@data-session-group]')
+    await group.locator('button[data-session-group-toggle]').click()
+    await choice.focus()
+    await expect(choice).to_be_focused()
+    sessions[1].update(lastActivityTime=now,status='active')
+    await page.evaluate("sessions=>window.postMessage({type:'session-list',sessions},'*')", sessions)
+    await expect(choice.locator('xpath=ancestor::li[@data-session-group]')).to_have_attribute('data-session-group','recent')
+    await expect(choice).to_be_focused()
+    await expect(choice).to_be_visible()
+    await expect(panel.locator('li[data-session-group="recent"] button[data-session-group-toggle]')).to_have_attribute('aria-expanded','true')
+    await expect(session_picker(page)).to_have_attribute('data-session-id','phone-primary')
+    await page.keyboard.press('Escape')
+    await expect(session_picker(page)).to_be_focused()
+
+
 async def session_history_browser(page):
     await page.evaluate('window.__phoneEventSources.forEach(source=>source.close())')
     now = await page.evaluate('Date.now()')
@@ -42,8 +139,7 @@ async def session_history_browser(page):
     live = [dict(id='phone-primary',label='Solver review',status='active',startTime=now-5*day,lastActivityTime=now-4*day,runtime='claude',provider='anthropic'),
             dict(id='phone-other',label='Other project',status='completed',startTime=now-day,lastActivityTime=now-3600000,runtime='codex',provider='openai')]
     await page.evaluate("sessions=>window.postMessage({type:'session-list',sessions},'*')",live)
-    picker=page.get_by_role('combobox',name='Main session',exact=True)
-    await expect(picker.locator('option').first).to_have_attribute('value','phone-other')
+    picker=session_picker(page)
     old_time=await page.evaluate('new Date(2026,9,1,14).getTime()')
     old_start=await page.evaluate('new Date(2026,8,21).getTime()')
     saved=[dict(id='old-claude',label='Editor specification',status='completed',startTime=old_start,lastActivityTime=old_time,runtime='claude',provider='anthropic',historical=True,project='superglm'),
@@ -71,21 +167,20 @@ async def session_history_browser(page):
     await page.route('**/session-cost-history?*',history_route)
     assert not catalog_calls,'Saved history should load only when requested'
     await page.get_by_role('button',name='Browse sessions',exact=True).click()
-    await expect(picker.locator('option[value="old-claude"]')).to_have_count(1)
-    provider=page.get_by_role('combobox',name='Session provider',exact=True)
-    activity=page.get_by_role('combobox',name='Session last activity',exact=True)
-    await provider.select_option('anthropic')
-    await activity.select_option('custom')
-    await page.get_by_label('Sessions active from',exact=True).fill('2026-09-01')
-    await page.get_by_label('Sessions active through',exact=True).fill('2026-10-10')
+    panel=page.get_by_role('dialog',name='Sessions',exact=True)
+    await expect(panel.locator('[data-session-choice="old-claude"]')).to_have_count(1)
+    recent=panel.locator('li[data-session-group="recent"]')
+    await expect(recent.locator('[data-session-choice]').first).to_have_attribute('data-session-choice','phone-other')
+    await expect(recent.locator('[data-session-choice="phone-primary"]')).to_have_count(0)
+    await panel.get_by_role('button',name='Anthropic',exact=True).click()
     await page.get_by_role('searchbox',name='Search sessions',exact=True).fill('SUPERGLM')
-    await expect(page.get_by_label('Session matches',exact=True)).to_contain_text('1 matching')
-    await expect(picker.locator('option[value="old-codex"]')).to_have_count(0)
-    await expect(picker).to_have_value('phone-primary')
+    await expect(page.get_by_label('Session matches',exact=True)).to_contain_text('1 session')
+    await expect(panel.locator('[data-session-choice="old-codex"]')).to_have_count(0)
+    await expect(picker).to_have_attribute('data-session-id','phone-primary')
     assert await page.evaluate('document.documentElement.scrollWidth<=innerWidth')
     if page.viewport_size['width']==390:
         await page.screenshot(path='/tmp/branchline-session-browser-phone.png')
-    await picker.select_option('old-claude')
+    await choose_session(page, 'old-claude')
     panel=page.get_by_role('region',name='Session API costs',exact=True)
     await expect(panel).to_be_visible()
     await expect(panel.get_by_label('Source day',exact=True)).to_have_value('2026-10-01')
@@ -95,10 +190,10 @@ async def session_history_browser(page):
     # Live session list refreshes and new sessions must not dislodge saved analytics.
     await page.evaluate("sessions=>window.postMessage({type:'session-list',sessions},'*')",live)
     await page.evaluate("session=>window.postMessage({type:'session-started',session},'*')",dict(id='new-live',label='New work',status='active',startTime=now,lastActivityTime=now))
-    await expect(picker).to_have_value('old-claude')
+    await expect(picker).to_have_attribute('data-session-id','old-claude')
     await expect(panel.get_by_label('Chart headline',exact=True)).to_have_text('$0.25')
     await panel.get_by_role('button',name='Close API costs',exact=True).click()
-    await expect(picker).to_have_value('old-claude')
+    await expect(picker).to_have_attribute('data-session-id','old-claude')
     # Resuming this same archive must adopt its real relay stream, while the
     # unrelated started session above must leave the archive selected.
     resumed = True
@@ -120,13 +215,13 @@ async def session_catalog_retry(page):
     await page.route('**/session-catalog*',catalog_route)
     await page.get_by_role('button',name='Browse sessions',exact=True).click()
     await expect(page.get_by_text('Could not load saved sessions. Your recent sessions are still available.',exact=True)).to_be_visible()
-    await expect(page.get_by_role('combobox',name='Main session',exact=True)).to_have_value('phone-primary')
+    await expect(session_picker(page)).to_have_attribute('data-session-id','phone-primary')
     await page.get_by_role('button',name='Refresh saved sessions',exact=True).click()
     await expect(page.get_by_text('Could not load saved sessions. Your recent sessions are still available.',exact=True)).to_have_count(0)
-    await expect(page.get_by_label('Session matches',exact=True)).to_contain_text('2 matching')
+    await expect(page.get_by_label('Session matches',exact=True)).to_contain_text('2 sessions')
     assert len(attempts)==2
     await page.evaluate("window.postMessage({type:'session-list',sessions:[]},'*')")
-    await expect(page.get_by_role('combobox',name='Main session',exact=True)).to_have_value('')
+    await expect(session_picker(page)).to_have_attribute('data-session-id','')
     await expect(page.get_by_role('button',name='Browse sessions',exact=True)).to_be_visible()
 
 
@@ -164,7 +259,7 @@ async def agent_navigation(page):
     await page.get_by_role("button", name="All agents", exact=True).click()
     await expect(activity).to_have_count(0)
     await reviewer.click()
-    await page.get_by_role("combobox", name="Main session").select_option("phone-other")
+    await choose_session(page, 'phone-other')
     await expect(activity).to_have_count(0)
     await expect(tree.get_by_role("button", name="Monitor Reviewer", exact=True)).to_have_count(0)
     await expect(tree.get_by_role("button", name="Monitor main session", exact=True)).to_contain_text("Other project")
@@ -174,7 +269,7 @@ async def portrait_controls(page):
     tree = page.get_by_role("navigation", name="Session agent tree")
     await expect(tree).to_be_visible(timeout=3000)
     controls = tree.get_by_role("button")
-    for control in [page.get_by_role("combobox", name="Main session")] + [controls.nth(i) for i in range(await controls.count())] + [page.get_by_role("button", name=name, exact=True) for name in ["Tree", "Graph", "Files", "Chat", "$Cost", "Timeline"]]:
+    for control in [session_picker(page)] + [controls.nth(i) for i in range(await controls.count())] + [page.get_by_role("button", name=name, exact=True) for name in ["Tree", "Graph", "Files", "Chat", "$Cost", "Timeline"]]:
         box = await control.bounding_box()
         assert box and box["x"] >= 0 and box["x"] + box["width"] <= page.viewport_size["width"], f"Control outside viewport: {box}"
         assert box["height"] >= 44, f"Touch target too short: {box}"
@@ -239,15 +334,14 @@ async def activity_reading(page):
 
 async def same_session_live(page):
     await page.get_by_role("button", name="Monitor Reviewer", exact=True).click()
-    picker = page.get_by_role("combobox", name="Main session")
-    await picker.dispatch_event("change")
+    await choose_session(page, 'phone-primary')
     event = dict(time=2, type="message", payload=dict(agent="Reviewer", role="assistant", content="Fresh activity after selecting the same session."), sessionId="phone-primary", eventId=1000, streamId="phone-fixture")
     await page.evaluate("event => window.postMessage({type:'agent-event',event},'*')", event)
     await expect(page.get_by_role("log", name="Agent messages")).to_contain_text("Fresh activity after selecting the same session.")
 
 
 async def cold_session_history(page):
-    await page.get_by_role("combobox", name="Main session").select_option("phone-other")
+    await choose_session(page, 'phone-other')
     await expect(page.get_by_role("button", name="Monitor main session", exact=True)).to_contain_text("Other project")
     await expect(page.get_by_role("alert")).to_have_count(0)
 
@@ -260,7 +354,7 @@ async def live_during_history_fetch(page):
         events = [event for event in packets[1]['events'] if event['sessionId'] == session_id]
         await route.fulfill(status=200, content_type='application/json', body=json.dumps(dict(streamId='phone-fixture', throughEventId=max(event['eventId'] for event in events), events=events)))
     await page.route('**/session-events?*', delayed_replay)
-    await page.get_by_role("combobox", name="Main session").select_option("phone-other")
+    await choose_session(page, 'phone-other')
     event = dict(time=3, type="message", payload=dict(agent="Orchestrator", role="assistant", content="Arrived during history refresh."), sessionId="phone-other", eventId=1001, streamId="phone-fixture")
     await page.evaluate("event => window.postMessage({type:'agent-event',event},'*')", event)
     await expect(page.get_by_role("status")).to_have_count(0)
@@ -274,7 +368,7 @@ async def delayed_replay_cannot_regress_state(page):
     async def fresh_replay(route):
         await route.fulfill(status=200, content_type='application/json', body=json.dumps(dict(streamId='phone-fixture', throughEventId=100, events=[spawn, context])))
     await page.route('**/session-events?*', fresh_replay)
-    await page.get_by_role("combobox", name="Main session").select_option("phone-other")
+    await choose_session(page, 'phone-other')
     await expect(page.get_by_role("status")).to_have_count(0)
     await page.get_by_role("button", name="Monitor main session", exact=True).click()
     activity = page.get_by_role("region", name="Agent activity")
@@ -296,7 +390,7 @@ async def failed_history_can_retry(page):
     async def failed_replay(route):
         await route.fulfill(status=503, body='temporarily unavailable')
     await page.route('**/session-events?*', failed_replay)
-    await page.get_by_role("combobox", name="Main session").select_option("phone-other")
+    await choose_session(page, 'phone-other')
     await expect(page.get_by_role("alert")).to_contain_text("Could not load")
     await page.unroute('**/session-events?*', failed_replay)
     await page.get_by_role("button", name="Retry", exact=True).click()
@@ -305,7 +399,7 @@ async def failed_history_can_retry(page):
 
 
 async def reset_same_session_keeps_live_updates(page):
-    await page.get_by_role("combobox", name="Main session").select_option("phone-other")
+    await choose_session(page, 'phone-other')
     await expect(page.get_by_role("status")).to_have_count(0)
     await expect(page.get_by_role("button", name="Monitor main session", exact=True)).to_contain_text("Other project")
     session = dict(id='phone-other', label='Other project', status='active', startTime=1, lastActivityTime=1)
@@ -326,7 +420,7 @@ async def reset_same_session_keeps_live_updates(page):
 
 
 async def reconnect_refreshes_selected_history(page):
-    await page.get_by_role("combobox", name="Main session").select_option("phone-other")
+    await choose_session(page, 'phone-other')
     await expect(page.get_by_role("status")).to_have_count(0)
     async def updated_replay(route):
         spawn = dict(time=0, type="agent_spawn", payload=dict(name="Orchestrator", isMain=True, runtime="codex"), sessionId="phone-other", eventId=7, streamId="phone-fixture")
@@ -340,7 +434,7 @@ async def reconnect_refreshes_selected_history(page):
 
 
 async def new_stream_live_during_reconnect(page):
-    await page.get_by_role("combobox", name="Main session").select_option("phone-other")
+    await choose_session(page, 'phone-other')
     await expect(page.get_by_role("status")).to_have_count(0)
     started, release = asyncio.Event(), asyncio.Event()
     spawn = dict(time=0, type="agent_spawn", payload=dict(name="Orchestrator", isMain=True, runtime="codex"), sessionId="phone-other", eventId=1, streamId="reconnected-fixture")
@@ -542,7 +636,7 @@ async def cost_history_graph(page):
     assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     if page.viewport_size['width'] == 390:
         await page.screenshot(path='/tmp/branchline-cost-history-phone.png')
-    await page.get_by_role('combobox', name='Main session').select_option('phone-other')
+    await choose_session(page, 'phone-other')
     await expect(readout).to_contain_text('$9.50')
     await page.get_by_role('button', name='Close API costs', exact=True).click()
     before = len(requests)
@@ -650,7 +744,7 @@ async def agent_model_settings(page):
     assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     if page.viewport_size['width'] == 390:
         await page.screenshot(path='/tmp/branchline-model-settings-phone.png')
-    await page.get_by_role('combobox', name='Main session').select_option('phone-other')
+    await choose_session(page, 'phone-other')
     await expect(tree.get_by_role('button', name='Monitor main session', exact=True)).to_contain_text('Model unreported')
 
 
@@ -1506,7 +1600,7 @@ async def cost_history_pending_queries(page):
             (lambda: panel.get_by_role('button', name='Filter costs for Opus 5.5', exact=True).click(), '$2.00'),
             (lambda: panel.get_by_role('combobox', name='Cost time resolution', exact=True).select_option('hour'), '$2.00'),
             (lambda: panel.get_by_role('combobox', name='Group costs by', exact=True).select_option('model-reasoning'), '$4.00'),
-            (lambda: page.get_by_role('combobox', name='Main session').select_option('phone-other'), '$9.00'),
+            (lambda: choose_session(page, 'phone-other'), '$9.00'),
         ]:
             gate = await hold(action)
             await expect(cost).to_have_count(0)
@@ -1538,7 +1632,7 @@ async def main():
             launch["executable_path"] = os.environ["PLAYWRIGHT_CHROMIUM_EXECUTABLE"]
         browser = await playwright.chromium.launch(**launch)
         for width in [360, 390, 1280]:
-            for check in [session_history_browser, session_catalog_retry, tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, agent_status_filters, cost_history_graph, cost_history_retry, cost_burn_breakdown, cost_burn_trends, cost_multi_day_comparison, cost_readable_layout, agent_model_settings, cost_model_analytics, cost_cache_reuse, cost_cache_write_unknown, cost_time_views, cost_phone_gestures, cost_history_pending_queries]:
+            for check in [session_picker_accordion,session_picker_live_focus,session_history_browser, session_catalog_retry, tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, agent_status_filters, cost_history_graph, cost_history_retry, cost_burn_breakdown, cost_burn_trends, cost_multi_day_comparison, cost_readable_layout, agent_model_settings, cost_model_analytics, cost_cache_reuse, cost_cache_write_unknown, cost_time_views, cost_phone_gestures, cost_history_pending_queries]:
                 if requested and check.__name__ not in requested:
                     continue
                 context = await browser.new_context(viewport=dict(width=width, height=844), is_mobile=width < 640, has_touch=width < 640)
@@ -1563,7 +1657,7 @@ async def main():
                         }
                         return originalStroke.call(this,x,y,width,height);
                       };""")
-                if check in [session_history_browser, reconnect_refreshes_selected_history, new_stream_live_during_reconnect]:
+                if check in [session_picker_live_focus,session_history_browser, reconnect_refreshes_selected_history, new_stream_live_during_reconnect]:
                     await page.add_init_script("""window.__phoneEventSources = [];
                       const NativeEventSource = window.EventSource;
                       window.EventSource = class extends NativeEventSource {
@@ -1586,7 +1680,7 @@ async def main():
                 await page.route('**/session-events?*', replay_route)
                 try:
                     await page.goto(url, wait_until="domcontentloaded")
-                    await expect(page.get_by_role("combobox", name="Main session")).to_have_value("phone-primary")
+                    await expect(session_picker(page)).to_have_attribute('data-session-id',"phone-primary")
                     await check(page)
                     assert not errors, f"Browser errors: {errors}"
                     if width == 390 and check is portrait_controls:

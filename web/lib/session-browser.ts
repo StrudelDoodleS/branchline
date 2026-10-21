@@ -31,6 +31,18 @@ export function browseSessions(sessions: SessionInfo[], filters: SessionFilters,
     .sort((a, b) => b.lastActivityTime - a.lastActivityTime || a.label.localeCompare(b.label) || a.id.localeCompare(b.id))
 }
 
+export function groupSessionsByActivity(sessions: SessionInfo[], now = Date.now()): { id: string; sessions: SessionInfo[] }[] {
+  const groups = new Map<string, SessionInfo[]>([['recent', []]])
+  for (const session of browseSessions(sessions, {}, now)) {
+    const date = new Date(session.lastActivityTime)
+    const id = session.lastActivityTime >= now - 86400000 ? 'recent'
+      : `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+    if (!groups.has(id)) groups.set(id, [])
+    groups.get(id)!.push(session)
+  }
+  return [...groups].map(([id, members]) => ({ id, sessions: members }))
+}
+
 export function mergeSavedSessions(saved: SessionInfo[], live: SessionInfo[]): SessionInfo[] {
   const merged = new Map(saved.map(session => [session.id, session]))
   for (const session of live) {

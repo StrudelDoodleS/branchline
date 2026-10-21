@@ -3,6 +3,28 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* Branchline: custom, touch-sized session browser. */
+.branchline-session-picker {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  width: calc(100% - 24px);
+  max-width: 560px;
+  max-height: calc(100dvh - 24px);
+  height: min(760px, calc(100dvh - 24px));
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid #475569;
+  border-radius: 16px;
+  background: #0f172a;
+  color: #f1f5f9;
+  color-scheme: dark;
+  font-family: var(--font-sans);
+  box-shadow: 0 24px 80px #0009;
+}
+.branchline-session-picker[open] { display: flex; flex-direction: column; }
+.branchline-session-picker::backdrop { background: #020617bd; }
+
 :root {
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);

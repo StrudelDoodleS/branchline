@@ -47,3 +47,32 @@ test('catalog merging keeps one choice per main session and preserves newer desc
   assert.equal(same.startTime, 10)
   assert.equal(same.status, 'active')
 })
+
+test('session groups use a rolling 24 hours, then local dates, without duplicate sessions', () => {
+  assert.equal(typeof Browser.groupSessionsByActivity, 'function')
+  const now = +new Date(2026, 9, 21, 10, 30)
+  const sessions = [session('old active', +new Date(2026, 9, 15, 12), { status: 'active' }),
+    session('just outside', now - 86400001), session('recent idle', now - 1000),
+    session('boundary', now - 86400000), session('same old date', +new Date(2026, 9, 15, 8)),
+    session('previous year', +new Date(2025, 9, 15, 12))]
+  const groups = Browser.groupSessionsByActivity(sessions, now)
+  assert.deepEqual(groups.map(group => [group.id, group.sessions.map(s => s.id)]), [
+    ['recent', ['recent idle', 'boundary']],
+    ['2026-10-20', ['just outside']],
+    ['2026-10-15', ['old active', 'same old date']],
+    ['2025-10-15', ['previous year']],
+  ])
+})
+
+test('session groups keep an empty recent row and apply provider/search before grouping', () => {
+  assert.equal(typeof Browser.groupSessionsByActivity, 'function')
+  const now = +new Date(2026, 9, 21, 10, 30)
+  const filtered = Browser.browseSessions([
+    session('claude', +new Date(2026, 9, 1), { provider: 'anthropic', project: 'superglm' }),
+    session('codex', now, { provider: 'openai', project: 'branchline' }),
+  ], { provider: 'anthropic', search: 'SUPERGLM' }, now)
+  assert.deepEqual(Browser.groupSessionsByActivity(filtered, now).map(group => [group.id, group.sessions.map(s => s.id)]), [
+    ['recent', []], ['2026-10-01', ['claude']],
+  ])
+  assert.deepEqual(Browser.groupSessionsByActivity([], now), [{ id: 'recent', sessions: [] }])
+})

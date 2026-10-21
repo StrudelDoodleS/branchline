@@ -136,7 +136,7 @@ export const TopBar = memo(function TopBar({
       className="absolute top-3 left-3 right-3 flex flex-col gap-2 rounded-lg border p-3 font-mono"
       style={{ zIndex: Z.info, background: '#0f172a', borderColor: '#475569', color: '#e2e8f0' }}
     >
-      {/* Session tabs — scrollable, takes available space */}
+      {/* Main-session button opens the grouped session browser. */}
         <div className="min-w-0 w-full">
           <SessionTabs
             sessions={sessions}
