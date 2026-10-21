@@ -614,6 +614,65 @@ async def cost_model_analytics(page):
         await page.screenshot(path='/tmp/branchline-cost-analytics-phone.png')
 
 
+async def cost_cache_write_estimate(page):
+    first, latest = 1790812800000, 1790812800000 + 7200000
+    sol = '["gpt-6.1-sol",null]'
+    max_effort = '["gpt-6.1-sol","max"]'
+    opus = '["claude-opus-5-5",null]'
+    zero = dict(input=0, output=0, cacheRead=0, cacheWrite=0, unattributed=0)
+
+    def group(key, model, tokens, input_cost, write_cost=0):
+        return dict(id=key, model=model, reasoningEffort='max' if key == max_effort else None,
+                    records=20, costUSD=input_cost+write_cost+1, knownCostUSD=input_cost+write_cost+1,
+                    tokens=dict(inputTokens=tokens, outputTokens=0, cacheReadTokens=8000000,
+                                cacheWriteTokens=100000 if write_cost else 0, cacheWrite1hTokens=0, reasoningTokens=0),
+                    totalTokens=tokens+8000000, averageCostUSDPerMinute=1,
+                    breakdownUSD=dict(zero, input=input_cost, cacheRead=1, cacheWrite=write_cost))
+
+    async def history_route(route):
+        query = parse_qs(urlparse(route.request.url).query)
+        detailed = query.get('groupBy') == ['model-reasoning']
+        key = max_effort if detailed else sol
+        groups = [group(key, 'gpt-6.1-sol', 5000000, 12), group(opus, 'claude-opus-5-5', 1000, 1, .5)]
+        selected = query.get('group', [None])[0]
+        total = sum(item['costUSD'] for item in groups if not selected or selected == item['id'])
+        history = dict(groups=groups, groupBy='model-reasoning' if detailed else 'model', range=query.get('range', ['total'])[0],
+                       points=[dict(timestamp=first, costUSD=0, breakdownUSD=zero), dict(timestamp=latest, costUSD=total, breakdownUSD=dict(zero, unattributed=total))],
+                       totalCostUSD=total, untimedCostUSD=0, unpricedResponses=0, bounds=dict(start=first, end=latest),
+                       window=dict(start=first, end=latest, startCostUSD=0, startBreakdownUSD=zero),
+                       burnRate=dict(bucketMs=7200000, endTimestamp=latest, points=[]))
+        await route.fulfill(status=200, content_type='application/json', body=json.dumps(dict(sessionId='phone-primary', history=history)))
+
+    await page.route('**/session-cost-history?*', history_route)
+    await page.get_by_role('button', name='$Cost', exact=True).click()
+    panel = page.get_by_role('region', name='Session API costs')
+    estimate = panel.get_by_role('region', name='Estimated cache writes', exact=True)
+    await expect(estimate).to_be_visible()
+    await expect(estimate.get_by_label('Estimated cache write tokens', exact=True)).to_have_text('5,000,000 tokens')
+    await expect(estimate.get_by_label('Estimated cache write cost', exact=True)).to_have_text('$15.00')
+    await expect(panel.get_by_label('Cost at selected time', exact=True)).to_have_text('$15.50')
+    await estimate.get_by_text('How estimated', exact=True).click()
+    await expect(estimate).to_contain_text('every uncached prompt token')
+    await expect(estimate).to_contain_text('30-minute')
+    await expect(estimate.get_by_label('Input cost already counted', exact=True)).to_have_text('$12.00')
+    await expect(estimate.get_by_label('Additional estimated cost', exact=True)).to_have_text('$3.00')
+    await panel.get_by_role('button', name='Show last hour cost history', exact=True).click()
+    await expect(estimate).to_contain_text('Whole session')
+    await expect(estimate.get_by_label('Estimated cache write cost', exact=True)).to_have_text('$15.00')
+    await panel.get_by_role('button', name='Filter costs for Opus 5.5', exact=True).click()
+    await expect(estimate).to_have_count(0)
+    await panel.get_by_role('button', name='Show costs for all models', exact=True).click()
+    await expect(estimate).to_be_visible()
+    await panel.get_by_role('combobox', name='Group costs by', exact=True).select_option('model-reasoning')
+    await panel.get_by_role('button', name='Filter costs for GPT-6.1-sol · max', exact=True).click()
+    await expect(estimate.get_by_label('Estimated cache write tokens', exact=True)).to_have_text('5,000,000 tokens')
+    await estimate.get_by_text('How estimated', exact=True).click()
+    for output in await estimate.locator('output').all():
+        box = await output.bounding_box()
+        assert box and box['x'] >= 0 and box['x']+box['width'] <= page.viewport_size['width']
+    assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+
+
 async def cost_time_views(page):
     first = 1790812800000  # Oct 1, 2026 UTC
     end = first + 20 * 86400000
@@ -1039,7 +1098,7 @@ async def main():
             launch["executable_path"] = os.environ["PLAYWRIGHT_CHROMIUM_EXECUTABLE"]
         browser = await playwright.chromium.launch(**launch)
         for width in [360, 390, 1280]:
-            for check in [tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, agent_status_filters, cost_history_graph, cost_history_retry, cost_burn_breakdown, agent_model_settings, cost_model_analytics, cost_time_views, cost_phone_gestures, cost_history_pending_queries]:
+            for check in [tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, agent_status_filters, cost_history_graph, cost_history_retry, cost_burn_breakdown, agent_model_settings, cost_model_analytics, cost_cache_write_estimate, cost_time_views, cost_phone_gestures, cost_history_pending_queries]:
                 if requested and check.__name__ not in requested:
                     continue
                 context = await browser.new_context(viewport=dict(width=width, height=844), is_mobile=width < 640, has_touch=width < 640)

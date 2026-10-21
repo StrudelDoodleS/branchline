@@ -6,6 +6,7 @@ import { useCostHistory } from '@/hooks/use-cost-history'
 import { useCostChartGestures } from '@/hooks/use-cost-chart-gestures'
 import { costPlotSeries } from '@/hooks/cost-plot-series'
 import { normalizeCostHistoryOptions } from '../../../extension/src/cost-history'
+import { estimateCodexCacheWrites } from '../../../extension/src/token-usage'
 import type { CostTimeWindow } from '../../../extension/src/cost-window'
 import type { CostBreakdown, CostHistoryPoint, CostHistoryOptions } from '../../../extension/src/token-usage'
 import { CostAnalyticsControls, costDollar as dollar, costRateUnit } from './cost-analytics-controls'
@@ -132,6 +133,7 @@ export function CostHistoryChart({ sessionId }: { sessionId: string | null }) {
   const group = history?.groups?.find(group => group.id === options.group)
   const codexZeroWrites = history?.groups?.some(group => (!options.group || group.id === options.group)
     && /^gpt-(6|5\.6)/.test(group.model ?? '') && group.tokens.cacheReadTokens > 0 && group.tokens.cacheWriteTokens === 0)
+  const cacheWriteEstimate = estimateCodexCacheWrites(history?.groups ?? [], options.group)
 
   return <section aria-label="Cost history" aria-busy={loading} className="mt-4 border-t pt-3" style={{ borderColor: '#475569' }}>
     <div className="flex items-center justify-between gap-2">
@@ -146,7 +148,23 @@ export function CostHistoryChart({ sessionId }: { sessionId: string | null }) {
     {window && <p className="mt-2 min-h-10 text-[10px] text-slate-300">{date(start)} – {date(end)}.
       {options.range === 'custom' ? ` Last ${options.hours}h · follows latest.` : options.range === 'window' ? ' Selected window.' : ''}
       {options.range !== 'total' && ' Cumulative cost includes earlier usage.'}</p>}
-    {codexZeroWrites && <p className="mt-2 text-[10px] text-amber-200">Codex reports zero write tokens despite cache hits. These counters do not verify cache-creation costs.</p>}
+    {cacheWriteEstimate ? <section aria-label="Estimated cache writes" className="mt-2 rounded border border-violet-400/50 bg-violet-950/30 p-2 text-[11px] text-violet-100">
+      <h4 className="font-semibold">Estimated cache writes</h4>
+      <div className="mt-1 flex flex-wrap justify-between gap-x-2 gap-y-1 tabular-nums">
+        <output aria-label="Estimated cache write tokens">{cacheWriteEstimate.tokens.toLocaleString('en-US')} tokens</output>
+        <output aria-label="Estimated cache write cost">{dollar(cacheWriteEstimate.costUSD)}</output>
+      </div>
+      <p className="mt-1 text-[10px] text-violet-200">Whole session · selected models / reasoning</p>
+      <p className="text-[10px] text-violet-200">Assumes all uncached input becomes cache writes.</p>
+      <details className="mt-1 text-[10px]">
+        <summary className="flex min-h-11 cursor-pointer items-center underline">How estimated</summary>
+        <p>Assumes every uncached prompt token is a 30-minute cache write at standard API prices. Includes the existing long-context rates. Actual writes are unreported.</p>
+        <p className="mt-1">Already counted as input: <output aria-label="Input cost already counted">{dollar(cacheWriteEstimate.alreadyCountedInputUSD)}</output>.
+          {' '}Additional estimated cost: <output aria-label="Additional estimated cost">{dollar(cacheWriteEstimate.additionalCostUSD)}</output>.</p>
+        <p className="mt-1">Graphs and totals use reported counters. This is an assumption-based estimate, not a recovered write count.</p>
+        <a className="mt-1 inline-flex min-h-11 items-center text-cyan-200 underline" href="https://developers.openai.com/api/docs/guides/prompt-caching" target="_blank" rel="noreferrer">API cache pricing and lifetimes</a>
+      </details>
+    </section> : codexZeroWrites && <p className="mt-2 text-[10px] text-amber-200">Codex reports zero write tokens despite cache hits. These counters do not verify cache-creation costs.</p>}
     {error && <div className="mt-2 flex items-center justify-between gap-2 text-amber-200">
       <p>{error}</p>
       <button type="button" aria-label="Retry cost history" onClick={retry} className="min-h-11 min-w-11 shrink-0 rounded border border-slate-500 px-2">Retry</button>
