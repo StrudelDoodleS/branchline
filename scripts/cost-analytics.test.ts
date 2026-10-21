@@ -176,3 +176,62 @@ test('a previous paging cursor cannot trap Total in an older window', () => {
   assert.equal(history.window!.start, first)
   close(cost(history), 5)
 })
+
+test('custom fractional hours follow the latest usage and preserve the cumulative baseline', () => {
+  const first = Date.parse('2026-10-20T00:00:00Z')
+  const end = first + 12 * 3600000
+  const records = Array.from({ length: 721 }, (_, i) => ({ timestamp: first + i * 60000, costUSD: 1 }))
+  for (const resolution of ['auto', 'minute', 'hour', 'day'] as const) {
+    const history = Usage.buildCostHistory(records, 240, end, { range: 'custom', hours: 3.5, resolution })
+    assert.deepEqual(history.bounds, { start: first, end })
+    assert.equal(history.window!.start, end - 3.5 * 3600000)
+    assert.equal(history.window!.end, end)
+    close(history.window!.startCostUSD, 510)
+    close(cost(history), 211)
+    close(history.points.at(-1)!.costUSD, 721)
+    assert.ok(history.points.length <= 240 && history.burnRate.points.length <= 240)
+  }
+})
+
+test('a panned window excludes later charges without losing session totals or earlier cumulative cost', () => {
+  const first = Date.parse('2026-10-20T00:00:00Z')
+  const records = Array.from({ length: 721 }, (_, i) => ({ timestamp: first + i * 60000, costUSD: 1 }))
+  const start = first + 3 * 3600000, end = first + 4 * 3600000
+  const history = Usage.buildCostHistory(records, 240, first + 13 * 3600000, { range: 'window', start, end })
+  assert.deepEqual(history.bounds, { start: first, end: first + 13 * 3600000 })
+  assert.equal(history.window!.start, start)
+  assert.equal(history.window!.end, end)
+  close(history.window!.startCostUSD, 180)
+  close(history.points.at(-1)!.costUSD, 241)
+  close(cost(history), 61)
+  close(history.totalCostUSD!, 721)
+  assert.equal(history.groups![0].costUSD, 721)
+})
+
+test('gesture windows clamp to the available session while keeping their width', () => {
+  const first = 10 * 3600000, end = 20 * 3600000
+  const records = [{ timestamp: first, costUSD: 1 }, { timestamp: end, costUSD: 2 }]
+  for (const [start, stop, expected] of [
+    [first - 3600000, first + 3600000, [first, first + 7200000]],
+    [end - 3600000, end + 3600000, [end - 7200000, end]],
+    [0, end + 3600000, [first, end]],
+  ] as const) {
+    const history = Usage.buildCostHistory(records, 240, undefined, { range: 'window', start, end: stop })
+    assert.deepEqual([history.window!.start, history.window!.end], expected)
+  }
+})
+
+test('custom time options validate query strings and reject unsafe or incomplete windows', () => {
+  assert.deepEqual(Usage.normalizeCostHistoryOptions({ range: 'custom', hours: '0.5' }),
+    { range: 'custom', hours: 0.5, resolution: 'auto', groupBy: 'model' })
+  assert.deepEqual(Usage.normalizeCostHistoryOptions({ range: 'window', start: '1000', end: '61000' }),
+    { range: 'window', start: 1000, end: 61000, resolution: 'auto', groupBy: 'model' })
+  for (const hours of [0, -1, '', 'NaN', 'Infinity', 10000, true, null]) {
+    assert.equal(Usage.normalizeCostHistoryOptions({ range: 'custom', hours }).range, 'total')
+  }
+  for (const raw of [{ start: 10, end: 10 }, { start: -1, end: 10 }, { start: 1 }, { start: 1, end: 9e15 }]) {
+    assert.equal(Usage.normalizeCostHistoryOptions({ range: 'window', ...raw }).range, 'total')
+  }
+  const reset = Usage.normalizeCostHistoryOptions({ range: 'total', hours: 3, start: 10, end: 20 })
+  assert.deepEqual(reset, { range: 'total', resolution: 'auto', groupBy: 'model' })
+})

@@ -1,8 +1,12 @@
 // Branchline fork modifications; see FORK.md.
 'use client'
 
-import { useState, type PointerEvent } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useCostHistory } from '@/hooks/use-cost-history'
+import { useCostChartGestures } from '@/hooks/use-cost-chart-gestures'
+import { costPlotSeries } from '@/hooks/cost-plot-series'
+import { normalizeCostHistoryOptions } from '../../../extension/src/cost-history'
+import type { CostTimeWindow } from '../../../extension/src/cost-window'
 import type { CostBreakdown, CostHistoryPoint, CostHistoryOptions } from '../../../extension/src/token-usage'
 import { CostAnalyticsControls, costDollar as dollar, costRateUnit } from './cost-analytics-controls'
 
@@ -19,10 +23,14 @@ const date = (value: number) => new Date(value).toLocaleString(undefined, { mont
 const parts = (point: CostHistoryPoint): CostBreakdown => point.breakdownUSD ?? { ...ZERO, unattributed: point.costUSD }
 const bucketLabel = (ms: number) => ms % 86400000 === 0 ? `${ms / 86400000} day` : ms % 3600000 === 0 ? `${ms / 3600000} hr` : `${ms / 60000} min`
 
-function HistoryPlot({ series, label, start, end, selectedTime, overlay, bucketMs, rateSuffix = 'min', onSelect }: {
+function HistoryPlot({ series: data, label, start, end, loaded, bounds, selectedTime, overlay, bucketMs, rateSuffix = 'min', onSelect, onPreview, onCommit }: {
   series: CostHistoryPoint[]; label: string; start: number; end: number; selectedTime: number;
   overlay: boolean; bucketMs?: number; rateSuffix?: string; onSelect: (timestamp: number) => void;
+  loaded: CostTimeWindow; bounds: CostTimeWindow; onPreview: (view: CostTimeWindow | null) => void; onCommit: (view: CostTimeWindow) => void;
 }) {
+  const gestures = useCostChartGestures({ view: { start, end }, bounds, onPreview, onCommit, onSelect })
+  // Only draw loaded data during a gesture; the new interval is fetched on release.
+  const series = costPlotSeries(data, { start, end }, loaded, bucketMs)
   const x = (time: number) => LEFT + (Math.max(start, Math.min(end, time)) - start) / Math.max(1, end - start) * (RIGHT - LEFT)
   const max = Math.max(...series.map(point => point.costUSD), 0) || 1
   const y = (cost: number) => BOTTOM - cost / max * (BOTTOM - TOP)
@@ -33,25 +41,20 @@ function HistoryPlot({ series, label, start, end, selectedTime, overlay, bucketM
   const area = (index: number) => path(point => stack(point, index + 1))
     + ` L${x(series.at(-1)!.timestamp)},${y(stack(series.at(-1)!, index))}`
     + series.slice(0, -1).reverse().map(point => ` V${y(stack(point, index))} H${x(point.timestamp)}`).join('') + ' Z'
-  const inspect = (event: PointerEvent<SVGSVGElement>) => {
-    const box = event.currentTarget.getBoundingClientRect()
-    const fraction = Math.max(0, Math.min(1, ((event.clientX - box.left) / box.width * 300 - LEFT) / (RIGHT - LEFT)))
-    onSelect(start + fraction * (end - start))
-  }
   const shortDate = (timestamp: number) => new Date(timestamp).toLocaleString(undefined,
     end - start >= 86400000 ? { month: 'short', day: 'numeric' } : { hour: '2-digit', minute: '2-digit' })
   const axis = max >= 1000000 ? `$${(max / 1000000).toFixed(1)}m` : max >= 1000 ? `$${(max / 1000).toFixed(1)}k` : dollar(max)
 
-  return <svg role="img" aria-label={label} viewBox="0 0 300 130" className="mt-1 block w-full" style={{ touchAction: 'pan-y' }}
-    onPointerDown={inspect} onPointerMove={event => { if (event.buttons) inspect(event) }}>
+  return <svg role="img" aria-label={label} tabIndex={0} data-window-start={start} data-window-end={end}
+    viewBox="0 0 300 130" className="mt-1 block w-full rounded focus-visible:outline focus-visible:outline-cyan-300" style={{ touchAction: 'pan-y' }} {...gestures}>
     <title>{label}</title>
-    <desc>{date(start)} to {date(end)}. {bucketMs ? `Dollars per ${rateSuffix === 'hr' ? 'hour' : rateSuffix === 'min' ? 'minute' : 'day'}, averaged in ${bucketLabel(bucketMs)} buckets.` : 'Cumulative API cost.'} Tap the graph or use the slider to inspect a time.</desc>
+    <desc>{date(start)} to {date(end)}. {bucketMs ? `Dollars per ${rateSuffix === 'hr' ? 'hour' : rateSuffix === 'min' ? 'minute' : 'day'}, averaged in ${bucketLabel(bucketMs)} buckets.` : 'Cumulative API cost.'} Tap to inspect, pinch to zoom, drag sideways to pan. Keyboard: plus or minus to zoom, left or right to pan. Total resets the view.</desc>
     {[TOP, (TOP + BOTTOM) / 2, BOTTOM].map(grid => <line key={grid} x1={LEFT} y1={grid} x2={RIGHT} y2={grid} stroke="#334155" />)}
     <text x="2" y={TOP + 4} fill="#cbd5e1" fontSize="9">{axis}</text>
     <text x="2" y={BOTTOM + 4} fill="#cbd5e1" fontSize="10">$0</text>
-    {bucketMs ? <g aria-label={overlay ? 'Burn rate source overlay' : undefined}>
-      {series.filter(point => point.timestamp < end).map(point => {
-        const left = x(point.timestamp), width = x(Math.min(end, point.timestamp + bucketMs)) - left
+    {!!series.length && (bucketMs ? <g aria-label={overlay ? 'Burn rate source overlay' : undefined}>
+      {series.filter(point => point.timestamp < Math.min(end, loaded.end)).map(point => {
+        const left = x(point.timestamp), width = x(Math.min(end, point.bucketEnd!)) - left
         let base = 0
         return overlay ? SOURCES.map(source => {
           const value = parts(point)[source.key], bottom = base
@@ -63,10 +66,10 @@ function HistoryPlot({ series, label, start, end, selectedTime, overlay, bucketM
       })}
     </g> : overlay ? <g aria-label="Cost source overlay">
       {SOURCES.map((source, index) => <path key={source.key} d={area(index)} fill={source.color} fillOpacity="0.5" />)}
-    </g> : <path d={`${path(point => point.costUSD)} L${x(end)},${BOTTOM} L${x(start)},${BOTTOM} Z`} fill="#22c55e" fillOpacity="0.12" />}
+    </g> : <path d={`${path(point => point.costUSD)} L${x(series.at(-1)!.timestamp)},${BOTTOM} L${x(series[0].timestamp)},${BOTTOM} Z`} fill="#22c55e" fillOpacity="0.12" />)}
     <path d={path(point => point.costUSD)} fill="none" stroke={bucketMs ? '#fde68a' : '#86efac'} strokeWidth="2" strokeLinejoin="round" />
     <line x1={x(selectedTime)} x2={x(selectedTime)} y1={TOP} y2={BOTTOM} stroke="#67e8f9" strokeDasharray="3 3" />
-    <circle cx={x(selectedTime)} cy={y(selected.costUSD)} r="3" fill="#67e8f9" />
+    {selected && <circle cx={x(selectedTime)} cy={y(selected.costUSD)} r="3" fill="#67e8f9" />}
     <text x={LEFT} y="121" fill="#cbd5e1" fontSize="10">{shortDate(start)}</text>
     <text x={RIGHT} y="121" textAnchor="end" fill="#cbd5e1" fontSize="10">{shortDate(end)}</text>
   </svg>
@@ -77,6 +80,15 @@ export function CostHistoryChart({ sessionId }: { sessionId: string | null }) {
   const { history, error, retry } = useCostHistory(sessionId, options)
   const [selectedTime, setSelectedTime] = useState<number | null>(null)
   const [overlay, setOverlay] = useState(true)
+  const [preview, setPreview] = useState<CostTimeWindow | null>(null)
+  const section = useRef<HTMLElement>(null)
+  const focusedPlot = useRef<string | null>(null)
+  useEffect(() => {
+    if (!history || !focusedPlot.current) return
+    // A range fetch briefly replaces the SVG. Keep keyboard navigation usable.
+    if (document.activeElement === document.body) section.current?.querySelector<SVGSVGElement>(`svg[aria-label="${focusedPlot.current}"]`)?.focus({ preventScroll: true })
+    focusedPlot.current = null
+  }, [history])
   const points = history?.points ?? []
   const first = points[0], last = points.at(-1)
   const rate = history?.burnRate
@@ -84,11 +96,14 @@ export function CostHistoryChart({ sessionId }: { sessionId: string | null }) {
   const window = history?.window
   const rates = rate?.points ?? []
   const unavailable = !!history?.unpricedResponses
-  const start = window?.start ?? Math.min(first?.timestamp ?? 0, rates[0]?.timestamp ?? first?.timestamp ?? 0)
-  const end = Math.max(window?.end ?? Math.max(last?.timestamp ?? 0, rate?.endTimestamp ?? last?.timestamp ?? 0), start + 1)
+  const loadedStart = window?.start ?? Math.min(first?.timestamp ?? 0, rates[0]?.timestamp ?? first?.timestamp ?? 0)
+  const loadedEnd = Math.max(window?.end ?? Math.max(last?.timestamp ?? 0, rate?.endTimestamp ?? last?.timestamp ?? 0), loadedStart + 1)
+  const start = preview?.start ?? loadedStart, end = preview?.end ?? loadedEnd
+  const bounds = history?.bounds ?? { start: loadedStart, end: loadedEnd }
+  const loaded = { start: loadedStart, end: loadedEnd }
   const time = Math.max(start, Math.min(end, selectedTime ?? end))
   const selectedIndex = Math.max(0, points.findLastIndex(point => point.timestamp <= time))
-  const baseline = { timestamp: start, costUSD: window?.startCostUSD ?? 0, breakdownUSD: window?.startBreakdownUSD ?? ZERO }
+  const baseline = { timestamp: loadedStart, costUSD: window?.startCostUSD ?? 0, breakdownUSD: window?.startBreakdownUSD ?? ZERO }
   const selected = points.findLast(point => point.timestamp <= time) ?? baseline
   const selectedRate = rates.find(point => point.timestamp <= time && time < point.timestamp + rate!.bucketMs)
   const selectPoint = (index: number) => setSelectedTime(index === points.length - 1 ? null : points[index].timestamp)
@@ -106,14 +121,23 @@ export function CostHistoryChart({ sessionId }: { sessionId: string | null }) {
   const rateParts = scaleRate(selectedRate?.breakdownUSDPerMinute ?? ZERO)
   const plotCosts: CostHistoryPoint[] = first && last ? [
     baseline, ...points,
-    { ...last, timestamp: end },
+    { ...last, timestamp: loadedEnd },
   ] : []
   const plotRates: CostHistoryPoint[] = rates.map(point => ({ timestamp: point.timestamp, costUSD: point.costUSDPerMinute * unit.factor, breakdownUSD: scaleRate(point.breakdownUSDPerMinute) }))
-  if (plotRates.length) plotRates.push({ ...plotRates.at(-1)!, timestamp: end })
-  const changeOptions = (next: CostHistoryOptions) => { setSelectedTime(null); setOptions(next) }
+  if (plotRates.length) plotRates.push({ ...plotRates.at(-1)!, timestamp: loadedEnd })
+  const changeOptions = (next: CostHistoryOptions) => { setPreview(null); setSelectedTime(null); setOptions(normalizeCostHistoryOptions({ ...next })) }
+  const changeWindow = (next: CostTimeWindow) => {
+    const start = Math.round(next.start), end = Math.round(next.end)
+    if (Math.abs(start - loadedStart) < 1 && Math.abs(end - loadedEnd) < 1) return
+    if (document.activeElement instanceof SVGSVGElement && section.current?.contains(document.activeElement)) focusedPlot.current = document.activeElement.getAttribute('aria-label')
+    changeOptions(start <= bounds.start && end >= bounds.end ? { ...options, range: 'total' }
+      : { ...options, range: 'window', start, end })
+  }
   const group = history?.groups?.find(group => group.id === options.group)
+  const codexZeroWrites = history?.groups?.some(group => (!options.group || group.id === options.group)
+    && /^gpt-(6|5\.6)/.test(group.model ?? '') && group.tokens.cacheReadTokens > 0 && group.tokens.cacheWriteTokens === 0)
 
-  return <section aria-label="Cost history" className="mt-4 border-t pt-3" style={{ borderColor: '#475569' }}>
+  return <section ref={section} aria-label="Cost history" className="mt-4 border-t pt-3" style={{ borderColor: '#475569' }}>
     <div className="flex items-center justify-between gap-2">
       <h3 className="font-semibold text-slate-100">Cost over time</h3>
       <button type="button" aria-label="Cost breakdown" aria-pressed={overlay} onClick={() => setOverlay(value => !value)}
@@ -123,7 +147,9 @@ export function CostHistoryChart({ sessionId }: { sessionId: string | null }) {
     <p className="break-words text-[11px] text-slate-300 [overflow-wrap:anywhere]">Cumulative · {group ? `${group.model ?? 'Model unreported'}${options.groupBy === 'model-reasoning' ? ` · ${group.reasoningEffort ?? 'effort unreported'}` : ''}` : 'main + subagents'}</p>
     <CostAnalyticsControls options={options} history={history} onChange={changeOptions} />
     {window && <p className="mt-2 text-[10px] text-slate-300">{date(start)} – {date(end)}.
+      {options.range === 'custom' ? ` Last ${options.hours}h · follows latest.` : options.range === 'window' ? ' Selected window.' : ''}
       {options.range !== 'total' && ' Cumulative cost includes earlier usage.'}</p>}
+    {codexZeroWrites && <p className="mt-2 text-[10px] text-amber-200">Codex logs zero cache writes; its parser also uses zero for missing write counts. Cache-write charges are unverified.</p>}
     {error && <div className="mt-2 flex items-center justify-between gap-2 text-amber-200">
       <p>{error}</p>
       <button type="button" aria-label="Retry cost history" onClick={retry} className="min-h-11 min-w-11 shrink-0 rounded border border-slate-500 px-2">Retry</button>
@@ -136,12 +162,15 @@ export function CostHistoryChart({ sessionId }: { sessionId: string | null }) {
         {SOURCES.filter(source => source.key !== 'unattributed' || parts(last).unattributed > 0).map(source =>
           <span key={source.key} className="inline-flex items-center gap-1"><span aria-hidden="true" className="inline-block h-2 w-2 rounded-sm" style={{ background: source.color }} />{source.label}</span>)}
       </div>}
-      <HistoryPlot series={plotCosts} label="API cost over time" start={start} end={end} selectedTime={time} overlay={overlay} onSelect={inspectCost} />
+      <p className="mt-2 text-[10px] text-slate-300">Pinch to zoom · drag sideways to pan · tap to inspect. Total resets.</p>
+      <p role="status" className="h-4 text-[10px] text-cyan-200">{preview ? 'Release to load this range.' : ''}</p>
+      <HistoryPlot series={plotCosts} label="API cost over time" start={start} end={end} loaded={loaded} bounds={bounds} selectedTime={time} overlay={overlay}
+        onSelect={inspectCost} onPreview={setPreview} onCommit={changeWindow} />
       {!!rates.length && <>
         <h4 className="mt-2 font-semibold text-slate-100">Dollar burn rate</h4>
         <p className="text-[11px] text-slate-300">$/{unit.suffix} · {bucketLabel(rate!.bucketMs)} buckets</p>
-        <HistoryPlot series={plotRates} label="API dollar burn rate" start={start} end={end} selectedTime={time} overlay={overlay}
-          bucketMs={rate!.bucketMs} rateSuffix={unit.suffix} onSelect={inspectRate} />
+        <HistoryPlot series={plotRates} label="API dollar burn rate" start={start} end={end} loaded={loaded} bounds={bounds} selectedTime={time} overlay={overlay}
+          bucketMs={rate!.bucketMs} rateSuffix={unit.suffix} onSelect={inspectRate} onPreview={setPreview} onCommit={changeWindow} />
       </>}
       <input type="range" aria-label="Inspect cost history" min={0} max={points.length - 1} step={1} value={selectedIndex}
         disabled={points.length < 2} onChange={event => selectPoint(Number(event.target.value))}

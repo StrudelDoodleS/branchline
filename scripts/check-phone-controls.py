@@ -676,6 +676,131 @@ async def cost_time_views(page):
         await page.screenshot(path='/tmp/branchline-time-views-phone.png')
 
 
+async def cost_phone_gestures(page):
+    first = 1790812800000
+    latest = first + 20 * 86400000
+    requests = []
+    zero = dict(input=0, output=0, cacheRead=0, cacheWrite=0, unattributed=0)
+    async def history_route(route):
+        query = parse_qs(urlparse(route.request.url).query)
+        requests.append(query)
+        view = query.get('range', ['total'])[0]
+        end = float(query['end'][0]) if view == 'window' else latest
+        start = (float(query['start'][0]) if view == 'window' else
+                 end - float(query['hours'][0]) * 3600000 if view == 'custom' else
+                 end - {'1h':3600000,'2h':7200000}[view] if view in ['1h','2h'] else first)
+        baseline = max(0, (start-first)/86400000)
+        def point(timestamp, cost):
+            return dict(timestamp=timestamp,costUSD=cost,breakdownUSD=dict(zero,unattributed=cost))
+        history = dict(points=[point(start,baseline),point(end,max(0,(end-first)/86400000))],groups=[],range=view,
+                       totalCostUSD=20,untimedCostUSD=0,unpricedResponses=0,bounds=dict(start=first,end=latest),
+                       window=dict(start=start,end=end,startCostUSD=baseline,startBreakdownUSD=dict(zero,unattributed=baseline)),
+                       burnRate=dict(bucketMs=3600000,endTimestamp=end,points=[dict(timestamp=start,costUSDPerMinute=1/1440,breakdownUSDPerMinute=dict(zero,unattributed=1/1440))]))
+        await route.fulfill(status=200,content_type='application/json',body=json.dumps(dict(sessionId='phone-primary',history=history)))
+    await page.route('**/session-cost-history?*',history_route)
+    await page.get_by_role('button',name='$Cost',exact=True).click()
+    panel = page.get_by_role('region',name='Session API costs')
+    hours = panel.get_by_role('spinbutton',name='Last hours',exact=True)
+    await expect(hours).to_be_visible()
+    await hours.fill('3.5')
+    await panel.get_by_role('button',name='Apply last hours',exact=True).click()
+    cost = panel.get_by_role('img',name='API cost over time',exact=True)
+    burn = panel.get_by_role('img',name='API dollar burn rate',exact=True)
+    await expect(cost).to_have_attribute('data-window-start',str(latest-12600000))
+    assert requests[-1]['range']==['custom'] and requests[-1]['hours']==['3.5']
+    await panel.get_by_role('combobox',name='Cost time resolution',exact=True).select_option('day')
+    await expect(cost).to_have_attribute('data-window-start',str(latest-12600000))
+    total = panel.get_by_role('button',name='Show total cost history',exact=True)
+    await total.click()
+    await expect(cost).to_have_attribute('data-window-start',str(first))
+    await expect(total).to_have_attribute('aria-pressed','true')
+    await cost.scroll_into_view_if_needed()
+
+    if page.viewport_size['width'] < 640:
+        cdp = await page.context.new_cdp_session(page)
+        async def touches(kind, points):
+            await cdp.send('Input.dispatchTouchEvent',dict(type=kind,touchPoints=[dict(x=x,y=y,id=i,radiusX=3,radiusY=3) for i,x,y in points]))
+        box = await cost.bounding_box()
+        cx = box['x'] + box['width'] * 167/300
+        cy = box['y'] + box['height'] * .42
+        width = box['width'] * 250/300
+        before = len([q for q in requests if q.get('range')==['window']])
+        await touches('touchStart',[(1,cx-25,cy),(2,cx+25,cy)])
+        for delta in [30,35,40,45,50]:
+            await touches('touchMove',[(1,cx-delta,cy),(2,cx+delta,cy)])
+        assert len([q for q in requests if q.get('range')==['window']])==before, 'Fetch only when the gesture ends'
+        async with page.expect_response(lambda response: '/session-cost-history?' in response.url and 'range=window' in response.url):
+            await touches('touchEnd',[])
+        query = requests[-1]
+        assert abs(float(query['start'][0])-(first+5*86400000)) < 20, query
+        assert abs(float(query['end'][0])-(first+15*86400000)) < 20, query
+        await expect(cost).to_have_attribute('data-window-start',query['start'][0])
+        await expect(burn).to_have_attribute('data-window-start',query['start'][0])
+        await expect(cost).to_have_attribute('data-window-end',query['end'][0])
+        assert len([q for q in requests if q.get('range')==['window']])==before+1
+        await expect(total).to_have_attribute('aria-pressed','false')
+        # Dragging right moves to earlier usage, preserving the zoom span.
+        await cost.scroll_into_view_if_needed()
+        if os.environ.get('PHONE_CHECK_TRACEBACK'):
+            await page.evaluate("""() => { window.__chartPointers=[]; for(const type of ['pointerdown','pointermove','pointerup','pointercancel','lostpointercapture']) document.addEventListener(type,event=>{const svg=event.target.closest?.('svg');window.__chartPointers.push({type,id:event.pointerId,x:event.clientX,y:event.clientY,label:svg?.getAttribute('aria-label')});},true); }""")
+        box = await cost.bounding_box()
+        cx, cy = box['x']+box['width']*.5, box['y']+box['height']*.42
+        await touches('touchStart',[(1,cx,cy)])
+        for delta in [.05,.1,.15,.2]:
+            await touches('touchMove',[(1,cx+width*delta,cy)])
+        async with page.expect_response(lambda response: '/session-cost-history?' in response.url and 'range=window' in response.url):
+            await touches('touchEnd',[])
+        query = requests[-1]
+        start, end = float(query['start'][0]),float(query['end'][0])
+        assert abs(start-(first+3*86400000)) < 30, query
+        assert abs(end-start-10*86400000) < 30, query
+        await expect(cost).to_have_attribute('data-window-start',query['start'][0])
+        await expect(burn).to_have_attribute('data-window-end',query['end'][0])
+        # Native vertical scrolling must cancel the pending chart gesture.
+        await cost.scroll_into_view_if_needed()
+        box = await cost.bounding_box()
+        cx, cy = box['x']+box['width']*.5, box['y']+box['height']*.4
+        previous = await panel.evaluate('element => element.scrollTop')
+        before = len([q for q in requests if q.get('range')==['window']])
+        await touches('touchStart',[(1,cx,cy)])
+        for dy in [-15,-30,-50,-70]:
+            await touches('touchMove',[(1,cx,cy+dy)])
+        await touches('touchEnd',[])
+        await expect(cost).to_have_attribute('data-window-start',query['start'][0])
+        assert len([q for q in requests if q.get('range')==['window']])==before
+        assert await panel.evaluate('element => element.scrollTop') > previous, 'Vertical chart swipe should scroll the panel'
+        # A touch cancellation restores the range without fetching it.
+        await cost.scroll_into_view_if_needed()
+        box = await cost.bounding_box()
+        cx,cy=box['x']+box['width']*.5,box['y']+box['height']*.4
+        await touches('touchStart',[(1,cx,cy)])
+        await touches('touchMove',[(1,cx+30,cy)])
+        await touches('touchCancel',[])
+        await expect(cost).to_have_attribute('data-window-start',query['start'][0])
+        assert len([q for q in requests if q.get('range')==['window']])==before
+        await cdp.detach()
+    else:
+        await cost.focus()
+        await page.keyboard.press('+')
+        await expect(cost).to_have_attribute('data-window-start',str(first+5*86400000))
+        await page.keyboard.press('ArrowRight')
+        await expect(cost).to_have_attribute('data-window-start',str(first+7.5*86400000).replace('.0',''))
+    await total.click()
+    await expect(cost).to_have_attribute('data-window-start',str(first))
+    await expect(burn).to_have_attribute('data-window-end',str(latest))
+    assert requests[-1]['range']==['total'] and 'start' not in requests[-1] and 'hours' not in requests[-1]
+    assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    for control in [hours,panel.get_by_role('button',name='Apply last hours',exact=True)]:
+        box=await control.bounding_box()
+        assert box and box['height']>=44 and box['x']>=0 and box['x']+box['width']<=page.viewport_size['width']
+    if page.viewport_size['width']==390:
+        await hours.fill('3.5')
+        await panel.get_by_role('button',name='Apply last hours',exact=True).click()
+        await expect(cost).to_have_attribute('data-window-start',str(latest-12600000))
+        await cost.scroll_into_view_if_needed()
+        await page.screenshot(path='/tmp/branchline-gesture-phone.png')
+
+
 async def main():
     url = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:3001"
     requested = set(sys.argv[2].split(',')) if len(sys.argv) > 2 else None
@@ -686,7 +811,7 @@ async def main():
             launch["executable_path"] = os.environ["PLAYWRIGHT_CHROMIUM_EXECUTABLE"]
         browser = await playwright.chromium.launch(**launch)
         for width in [360, 390, 1280]:
-            for check in [tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, agent_status_filters, cost_history_graph, cost_history_retry, cost_burn_breakdown, agent_model_settings, cost_model_analytics, cost_time_views]:
+            for check in [tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, agent_status_filters, cost_history_graph, cost_history_retry, cost_burn_breakdown, agent_model_settings, cost_model_analytics, cost_time_views, cost_phone_gestures]:
                 if requested and check.__name__ not in requested:
                     continue
                 context = await browser.new_context(viewport=dict(width=width, height=844), is_mobile=width < 640, has_touch=width < 640)
@@ -744,6 +869,10 @@ async def main():
                         await page.screenshot(path="/tmp/agent-flow-phone-reviewer.png")
                     print("PASS", width, check.__name__, flush=True)
                 except Exception as error:
+                    if os.environ.get('PHONE_CHECK_TRACEBACK'):
+                        import traceback
+                        traceback.print_exc()
+                        print('Touch diagnostic:',await page.evaluate('({events:window.__chartPointers?.slice(-20),scale:visualViewport.scale,scroll:document.querySelector("[aria-label=\"Session API costs\"]")?.scrollTop})'))
                     failures.append(f"{width}/{check.__name__}")
                     print("FAIL", width, check.__name__, str(error).split("Call log:")[0].strip(), flush=True)
                 finally:

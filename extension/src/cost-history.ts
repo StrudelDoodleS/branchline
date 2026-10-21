@@ -1,5 +1,6 @@
 // Branchline fork modifications; see FORK.md.
 import type { TokenCounts } from './token-usage'
+import { clampCostWindow, type CostTimeWindow } from './cost-window'
 
 export interface CostBreakdown { input: number; output: number; cacheRead: number; cacheWrite: number; unattributed: number }
 export interface CostRecord {
@@ -14,8 +15,13 @@ export interface CostHistoryPoint { timestamp: number; costUSD: number; breakdow
 export interface BurnRatePoint { timestamp: number; costUSDPerMinute: number; breakdownUSDPerMinute: CostBreakdown }
 export type CostResolution = 'auto' | 'minute' | 'hour' | 'day'
 export type CostGrouping = 'model' | 'model-reasoning'
-export type CostRange = 'total' | '1h' | '2h'
-export interface CostHistoryOptions { resolution?: CostResolution; groupBy?: CostGrouping; group?: string; range?: CostRange }
+export type CostRange = 'total' | '1h' | '2h' | 'custom' | 'window'
+export interface CostHistoryOptions {
+  resolution?: CostResolution; groupBy?: CostGrouping; group?: string; range?: CostRange
+  hours?: number
+  start?: number
+  end?: number
+}
 export interface CostGroup {
   id: string
   model?: string
@@ -39,6 +45,7 @@ export interface CostHistory {
   group?: string
   resolution?: CostResolution
   range?: CostRange
+  bounds?: CostTimeWindow
   window?: { start: number; end: number; startCostUSD: number; startBreakdownUSD: CostBreakdown }
 }
 
@@ -58,8 +65,13 @@ const groupId = (record: CostRecord, groupBy: CostGrouping) => JSON.stringify([r
 export function normalizeCostHistoryOptions(raw: Record<string, unknown> = {}): CostHistoryOptions {
   const resolution = raw.resolution === 'minute' || raw.resolution === 'hour' || raw.resolution === 'day' ? raw.resolution : 'auto'
   const groupBy = raw.groupBy === 'model-reasoning' ? 'model-reasoning' : 'model'
-  const range = raw.range === '1h' || raw.range === '2h' ? raw.range : 'total'
+  const number = (value: unknown) => (typeof value === 'number' || typeof value === 'string' && value.trim()) && Number.isFinite(Number(value)) ? Number(value) : NaN
+  const hours = number(raw.hours), start = number(raw.start), end = number(raw.end)
+  const range = raw.range === 'custom' && hours >= 1 / 60 && hours <= 8760 ? 'custom'
+    : raw.range === 'window' && start >= 0 && end > start && end <= 8640000000000000 ? 'window'
+    : raw.range === '1h' || raw.range === '2h' ? raw.range : 'total'
   return { resolution, groupBy, range,
+    ...(range === 'custom' ? { hours } : {}), ...(range === 'window' ? { start, end } : {}),
     ...(typeof raw.group === 'string' && raw.group.length <= 1024 && raw.group ? { group: raw.group } : {}) }
 }
 
@@ -94,8 +106,8 @@ export function buildCostHistory(source: Iterable<CostRecord>, maxPoints = 240, 
   const records = [...source]
   let first = Infinity, last = -Infinity
   for (const record of records) if (dated(record)) { first = Math.min(first, record.timestamp); last = Math.max(last, record.timestamp) }
-  const end = Number.isFinite(last) ? Math.max(last, now !== undefined && Number.isFinite(now) ? now : last) : 0
-  const groups = summarize(records, options.groupBy!, Number.isFinite(first) ? Math.max(1, end - first) : 0)
+  const latest = Number.isFinite(last) ? Math.max(last, now !== undefined && Number.isFinite(now) ? now : last) : 0
+  const groups = summarize(records, options.groupBy!, Number.isFinite(first) ? Math.max(1, latest - first) : 0)
   const charges = new Map<number, { costUSD: number; breakdownUSD: CostBreakdown }>()
   let untimedCostUSD = 0, unpricedResponses = 0, total = 0
   for (const record of records) {
@@ -113,8 +125,10 @@ export function buildCostHistory(source: Iterable<CostRecord>, maxPoints = 240, 
     totalCostUSD: unpricedResponses ? null : total, unpricedResponses, groups,
     groupBy: options.groupBy, group: options.group, resolution: options.resolution, range: options.range }
   if (!Number.isFinite(first)) return history
-  const duration = options.range === '1h' ? 3600000 : options.range === '2h' ? 7200000 : undefined
-  const start = duration === undefined ? first : Math.max(0, end - duration)
+  history.bounds = { start: first, end: latest }
+  const duration = options.range === '1h' ? 3600000 : options.range === '2h' ? 7200000 : options.range === 'custom' ? options.hours! * 3600000 : undefined
+  const { start, end } = options.range === 'window' ? clampCostWindow({ start: options.start!, end: options.end! }, history.bounds)
+    : { start: duration === undefined ? first : Math.max(0, latest - duration), end: latest }
   let bucketMs = options.resolution === 'day' ? 86400000 : options.resolution === 'hour' ? 3600000 : 60000
   const minimumWidth = Math.max(1, (end - start) / (limit - 1) / bucketMs)
   const magnitude = 10 ** Math.floor(Math.log10(minimumWidth))

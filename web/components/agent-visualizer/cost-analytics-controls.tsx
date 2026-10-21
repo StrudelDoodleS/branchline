@@ -2,6 +2,7 @@
 'use client'
 
 import { formatModelName } from '@/lib/utils'
+import { useState } from 'react'
 import type { CostHistory, CostHistoryOptions } from '../../../extension/src/token-usage'
 
 export const costDollar = (value: number) => `$${value > 0 && value < 0.0001 ? value.toFixed(6) : value > 0 && value < 0.01 ? value.toFixed(4) : value.toFixed(2)}`
@@ -13,6 +14,7 @@ const tokenFormat = new Intl.NumberFormat('en-US', { notation: 'compact', maximu
 export function CostAnalyticsControls({ options, history, onChange }: {
   options: CostHistoryOptions; history?: CostHistory; onChange: (options: CostHistoryOptions) => void;
 }) {
+  const [hours, setHours] = useState('2')
   const groups = history?.groups ?? []
   const total = groups.reduce((sum, group) => sum + group.knownCostUSD, 0)
   const unit = costRateUnit(options.resolution)
@@ -43,8 +45,20 @@ export function CostAnalyticsControls({ options, history, onChange }: {
         aria-pressed={(options.range ?? 'total') === range} className={control}
         style={{ background: (options.range ?? 'total') === range ? '#164e63' : undefined,
           borderColor: (options.range ?? 'total') === range ? '#67e8f9' : undefined }}
-        onClick={() => onChange({ ...options, range })}>{label}</button>)}
+        onClick={() => onChange({ ...options, range, hours: undefined, start: undefined, end: undefined })}>{label}</button>)}
     </div>
+    <form aria-label="Custom recent cost history" className="mt-2 flex items-center gap-2"
+      onSubmit={event => { event.preventDefault(); onChange({ ...options, range: 'custom', hours: Number(hours), start: undefined, end: undefined }) }}>
+      <label className="flex min-w-0 flex-1 items-center gap-2 text-[11px] text-slate-300">
+        <span>Last</span>
+        <input aria-label="Last hours" type="number" inputMode="decimal" min={1 / 60} max={8760} step="any" required
+          value={hours} onChange={event => setHours(event.target.value)} className={`${control} w-full flex-1`}
+          title="Hours from 0.017 to 8760; decimals such as 0.5 are supported" />
+        <span>hours</span>
+      </label>
+      <button type="submit" aria-label="Apply last hours" className={control}
+        style={{ borderColor: options.range === 'custom' ? '#67e8f9' : undefined }}>Apply</button>
+    </form>
     {!!groups.length && <section aria-label="Costs by model" className="mt-3">
       <div className="flex items-center justify-between gap-2">
         <h4 className="text-[11px] text-slate-300">{detailed ? 'Model + reasoning' : 'By model'}</h4>
