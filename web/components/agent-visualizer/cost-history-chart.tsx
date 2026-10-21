@@ -149,7 +149,7 @@ export function CostHistoryChart({ sessionId }: { sessionId: string | null }) {
     {window && <p className="mt-2 text-[10px] text-slate-300">{date(start)} – {date(end)}.
       {options.range === 'custom' ? ` Last ${options.hours}h · follows latest.` : options.range === 'window' ? ' Selected window.' : ''}
       {options.range !== 'total' && ' Cumulative cost includes earlier usage.'}</p>}
-    {codexZeroWrites && <p className="mt-2 text-[10px] text-amber-200">Codex logs zero cache writes; its parser also uses zero for missing write counts. Cache-write charges are unverified.</p>}
+    {codexZeroWrites && <p className="mt-2 text-[10px] text-amber-200">Codex reports zero write tokens despite cache hits. These counters do not verify cache-creation costs.</p>}
     {error && <div className="mt-2 flex items-center justify-between gap-2 text-amber-200">
       <p>{error}</p>
       <button type="button" aria-label="Retry cost history" onClick={retry} className="min-h-11 min-w-11 shrink-0 rounded border border-slate-500 px-2">Retry</button>
