@@ -1,13 +1,26 @@
 // Branchline fork modifications; see FORK.md.
 'use client'
 
+import { useEffect, useRef } from 'react'
 import type { Agent } from '@/lib/agent-types'
-import { Z } from '@/lib/agent-types'
 import { sessionUsage, formatApiCost } from '@/lib/usage'
 import { stopPropagationHandlers } from './shared-ui'
 import { CostHistoryChart } from './cost-history-chart'
 
 export function UsagePanel({ visible, agents, sessionId, onClose }: { visible: boolean; agents: Map<string, Agent>; sessionId: string | null; onClose: () => void }) {
+  const panelRef = useRef<HTMLElement>(null)
+  useEffect(() => {
+    if (!visible) return
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const panel = panelRef.current
+    const close = panel?.querySelector<HTMLButtonElement>('[aria-label="Close API costs"]')
+    close?.focus({ preventScroll: true })
+    const contain = (event: FocusEvent) => {
+      if (matchMedia('(max-width: 639px)').matches && event.target instanceof Node && panel && !panel.contains(event.target)) close?.focus({ preventScroll: true })
+    }
+    document.addEventListener('focusin', contain)
+    return () => { document.removeEventListener('focusin', contain); if (previous?.isConnected) previous.focus({ preventScroll: true }) }
+  }, [visible])
   if (!visible) return null
   const usage = sessionUsage(agents.values())
   const fields = usage ? [
@@ -16,20 +29,28 @@ export function UsagePanel({ visible, agents, sessionId, onClose }: { visible: b
     ...(usage.cacheWrite1hTokens > 0 ? [['Cache write (1h)', usage.cacheWrite1hTokens]] : []),
   ] as const : []
 
-  return <section role="region" aria-label="Session API costs" {...stopPropagationHandlers}
-    className="absolute rounded-lg border p-3 font-mono text-xs shadow-xl"
-    style={{ top: 'var(--agent-controls-bottom, 48px)', right: 12, width: 'min(340px, calc(100% - 24px))',
-      maxHeight: 'calc(100% - var(--agent-controls-bottom, 48px) - 88px)', overflowY: 'auto',
-      zIndex: Z.sidePanel, background: '#0f172a', borderColor: '#475569', color: '#e2e8f0' }}>
-    <div className="flex items-center justify-between gap-2">
-      <h2 className="font-semibold">API COST</h2>
+  return <section ref={panelRef} role="region" aria-label="Session API costs" {...stopPropagationHandlers}
+    onKeyDown={event => {
+      event.stopPropagation()
+      if (event.key === 'Escape') { event.preventDefault(); onClose(); return }
+      if (event.key !== 'Tab' || !matchMedia('(max-width: 639px)').matches) return
+      const focusable = [...event.currentTarget.querySelectorAll<HTMLElement>('button, input, select, textarea, summary, [href], [tabindex]:not([tabindex="-1"])')]
+        .filter(element => element.getClientRects().length > 0 && !element.hasAttribute('disabled') && element.tabIndex >= 0)
+      const first = focusable[0], last = focusable.at(-1)
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus() }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
+    }}
+    className="branchline-cost-panel shadow-xl">
+    <div className="sticky top-0 z-10 flex items-center justify-between gap-2 bg-slate-900 pb-2">
+      <h2 className="text-lg font-semibold">Costs</h2>
       <button type="button" aria-label="Close API costs" onClick={onClose}
         className="flex min-h-11 min-w-11 items-center justify-center rounded border"
         style={{ borderColor: '#475569' }}>✕</button>
     </div>
-    <div className="mt-1 text-lg" style={{ color: '#86efac' }}>{formatApiCost(usage)}</div>
-    <p className="mt-1" style={{ color: '#cbd5e1' }}>Recorded usage · main + subagents</p>
     <CostHistoryChart key={sessionId ?? 'none'} sessionId={sessionId} />
+    <details className="mt-4 border-t border-slate-700 pt-1 text-sm">
+    <summary className="min-h-11 cursor-pointer content-center text-slate-300">Session totals</summary>
+    <p className="mt-1 text-slate-300">{formatApiCost(usage)} · main + subagents</p>
     <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2">
       {fields.map(([label, value]) => <div key={label} className="min-w-0">
         <dt style={{ color: '#cbd5e1' }}>{label}</dt>
@@ -49,5 +70,6 @@ export function UsagePanel({ visible, agents, sessionId, onClose }: { visible: b
     <p className="mt-3 text-[11px]" style={{ color: '#cbd5e1' }}>
       Standard API list prices, checked 20 Oct 2026. Context fill is separate. Subscription charges and tool fees are excluded.
     </p>
+    </details>
   </section>
 }

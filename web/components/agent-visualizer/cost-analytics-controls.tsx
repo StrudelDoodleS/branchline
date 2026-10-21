@@ -7,12 +7,26 @@ import type { CostHistory, CostHistoryOptions } from '../../../extension/src/tok
 
 export const costDollar = (value: number) => `$${value > 0 && value < 0.0001 ? value.toFixed(6) : value > 0 && value < 0.01 ? value.toFixed(4) : value.toFixed(2)}`
 export const costRateUnit = (resolution?: string) => resolution === 'day' ? { factor: 1440, suffix: 'day' }
-  : resolution === 'hour' ? { factor: 60, suffix: 'hr' } : { factor: 1, suffix: 'min' }
+  : resolution === 'minute' ? { factor: 1, suffix: 'min' } : { factor: 60, suffix: 'hr' }
 const control = 'min-h-11 min-w-0 rounded border border-slate-500 bg-slate-900 px-2 text-[11px] text-slate-100'
 const tokenFormat = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 })
 
-export function CostAnalyticsControls({ options, history, onChange }: {
+export function CostTimeRangeControls({ options, onChange }: { options: CostHistoryOptions; onChange: (options: CostHistoryOptions) => void }) {
+  return <div role="group" aria-label="Cost time range" className="mt-3 grid grid-cols-3 gap-2">
+    {([
+      ['total', 'Total', 'Show total cost history'],
+      ['1h', 'Last 1h', 'Show last hour cost history'],
+      ['2h', 'Last 2h', 'Show last 2 hours cost history'],
+    ] as const).map(([range, label, aria]) => <button key={range} type="button" aria-label={aria}
+      aria-pressed={(options.range ?? 'total') === range} className="min-h-11 rounded-lg px-2 text-sm text-slate-200"
+      style={{ background: (options.range ?? 'total') === range ? '#1e3a5f' : '#172033' }}
+      onClick={() => onChange({ ...options, range, hours: undefined, start: undefined, end: undefined })}>{label}</button>)}
+  </div>
+}
+
+export function CostAnalyticsControls({ options, history, onChange, showRange = true }: {
   options: CostHistoryOptions; history?: CostHistory; onChange: (options: CostHistoryOptions) => void;
+  showRange?: boolean;
 }) {
   const [hours, setHours] = useState('2')
   const groups = history?.groups ?? []
@@ -36,17 +50,7 @@ export function CostAnalyticsControls({ options, history, onChange }: {
         </select>
       </label>
     </div>
-    <div role="group" aria-label="Cost time range" className="mt-2 grid grid-cols-3 gap-2">
-      {([
-        ['total', 'Total', 'Show total cost history'],
-        ['1h', 'Last 1h', 'Show last hour cost history'],
-        ['2h', 'Last 2h', 'Show last 2 hours cost history'],
-      ] as const).map(([range, label, aria]) => <button key={range} type="button" aria-label={aria}
-        aria-pressed={(options.range ?? 'total') === range} className={control}
-        style={{ background: (options.range ?? 'total') === range ? '#164e63' : undefined,
-          borderColor: (options.range ?? 'total') === range ? '#67e8f9' : undefined }}
-        onClick={() => onChange({ ...options, range, hours: undefined, start: undefined, end: undefined })}>{label}</button>)}
-    </div>
+    {showRange && <CostTimeRangeControls options={options} onChange={onChange} />}
     <form aria-label="Custom recent cost history" className="mt-2 flex items-center gap-2"
       onSubmit={event => { event.preventDefault(); onChange({ ...options, range: 'custom', hours: Number(hours), start: undefined, end: undefined }) }}>
       <label className="flex min-w-0 flex-1 items-center gap-2 text-[11px] text-slate-300">

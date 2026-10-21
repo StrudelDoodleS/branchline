@@ -8,10 +8,12 @@ import { costPlotSeries } from '@/hooks/cost-plot-series'
 import { normalizeCostHistoryOptions } from '../../../extension/src/cost-history'
 import type { CostTimeWindow } from '../../../extension/src/cost-window'
 import type { CostBreakdown, CostHistoryPoint, CostHistoryOptions } from '../../../extension/src/token-usage'
-import { CostAnalyticsControls, costDollar as dollar, costRateUnit } from './cost-analytics-controls'
+import { CostAnalyticsControls, CostTimeRangeControls, costDollar as dollar, costRateUnit } from './cost-analytics-controls'
 import { CacheReusePanel } from './cache-reuse-panel'
 import { DailyBurnComparison } from './daily-burn-comparison'
 import type { BurnSource } from '@/hooks/burn-comparison'
+import { curvePath } from '@/hooks/curve-path'
+import { formatModelName } from '@/lib/utils'
 
 const LEFT = 42, RIGHT = 292, TOP = 12
 const SOURCES = [
@@ -26,27 +28,28 @@ const date = (value: number) => new Date(value).toLocaleString(undefined, { mont
 const parts = (point: CostHistoryPoint): CostBreakdown => point.breakdownUSD ?? { ...ZERO, unattributed: point.costUSD }
 const bucketLabel = (ms: number) => ms % 86400000 === 0 ? `${ms / 86400000} day` : ms % 3600000 === 0 ? `${ms / 3600000} hr` : `${ms / 60000} min`
 
-function HistoryPlot({ series: data, label, start, end, loaded, bounds, selectedTime, overlay, bucketMs, rateSuffix = 'min', burnSource = 'all', rateStyle = 'lines', onSelect, onPreview, onCommit }: {
+function HistoryPlot({ series: data, label, start, end, loaded, bounds, selectedTime, inspecting, overlay, bucketMs, rateSuffix = 'min', burnSource = 'all', rateStyle = 'lines', onSelect, onPreview, onCommit }: {
   series: CostHistoryPoint[]; label: string; start: number; end: number; selectedTime: number;
   overlay: boolean; bucketMs?: number; rateSuffix?: string; onSelect: (timestamp: number) => void;
   loaded: CostTimeWindow; bounds: CostTimeWindow; onPreview: (view: CostTimeWindow | null) => void; onCommit: (view: CostTimeWindow) => void;
   burnSource?: 'all' | BurnSource; rateStyle?: 'lines' | 'bars';
+  inspecting: boolean;
 }) {
-  const BOTTOM = bucketMs ? 186 : 96
+  const BOTTOM = 186
   const gestures = useCostChartGestures({ view: { start, end }, bounds, onPreview, onCommit, onSelect })
   // Only draw loaded data during a gesture; the new interval is fetched on release.
   const clipped = costPlotSeries(data, { start, end }, loaded, bucketMs)
   const source = burnSource !== 'all' && burnSource !== 'total' ? burnSource : null
   const series = bucketMs && source ? clipped.map(point => ({ ...point, costUSD: parts(point)[source] })) : clipped
-  const sourceColor = SOURCES.find(item => item.key === source)?.color ?? '#fde68a'
+  const sourceColor = SOURCES.find(item => item.key === source)?.color ?? '#67e8f9'
   const showRateSources = overlay && burnSource === 'all'
   const x = (time: number) => LEFT + (Math.max(start, Math.min(end, time)) - start) / Math.max(1, end - start) * (RIGHT - LEFT)
   const max = Math.max(...series.map(point => point.costUSD), 0) || 1
   const y = (cost: number) => BOTTOM - cost / max * (BOTTOM - TOP)
   const selected = series.findLast(point => point.timestamp <= selectedTime) ?? series[0]
-  const path = (value: (point: CostHistoryPoint) => number) => series.map((point, index) =>
-    bucketMs && rateStyle === 'lines' ? `${index ? 'L' : 'M'}${x(point.timestamp)},${y(value(point))}`
-      : `${index ? 'H' : 'M'}${x(point.timestamp)}${index ? 'V' : ','}${y(value(point))}`).join(' ')
+  const path = (value: (point: CostHistoryPoint) => number) => bucketMs && rateStyle === 'lines'
+    ? curvePath(series.map(point => ({ x: x(point.timestamp), y: y(value(point)) })))
+    : series.map((point, index) => `${index ? 'H' : 'M'}${x(point.timestamp)}${index ? 'V' : ','}${y(value(point))}`).join(' ')
   const stack = (point: CostHistoryPoint, count: number) => SOURCES.slice(0, count).reduce((sum, source) => sum + parts(point)[source.key], 0)
   const area = (index: number) => path(point => stack(point, index + 1))
     + ` L${x(series.at(-1)!.timestamp)},${y(stack(series.at(-1)!, index))}`
@@ -83,8 +86,8 @@ function HistoryPlot({ series: data, label, start, end, loaded, bounds, selected
       {SOURCES.map((source, index) => <path key={source.key} d={area(index)} fill={source.color} fillOpacity="0.5" />)}
     </g> : <path d={`${path(point => point.costUSD)} L${x(series.at(-1)!.timestamp)},${BOTTOM} L${x(series[0].timestamp)},${BOTTOM} Z`} fill="#22c55e" fillOpacity="0.12" />)}
     {(!bucketMs || rateStyle === 'bars' || showRateSources) && <path d={path(point => point.costUSD)} fill="none" stroke={bucketMs ? sourceColor : '#86efac'} strokeWidth="2" strokeLinejoin="round" />}
-    <line x1={x(selectedTime)} x2={x(selectedTime)} y1={TOP} y2={BOTTOM} stroke="#67e8f9" strokeDasharray="3 3" />
-    {selected && <circle cx={x(selectedTime)} cy={y(selected.costUSD)} r="3" fill="#67e8f9" />}
+    {inspecting && <line x1={x(selectedTime)} x2={x(selectedTime)} y1={TOP} y2={BOTTOM} stroke="#67e8f9" strokeDasharray="3 3" />}
+    {inspecting && selected && <circle cx={x(selectedTime)} cy={y(selected.costUSD)} r="3" fill="#67e8f9" />}
     <text x={LEFT} y={BOTTOM + 25} fill="#cbd5e1" fontSize="10">{shortDate(start)}</text>
     <text x={RIGHT} y={BOTTOM + 25} textAnchor="end" fill="#cbd5e1" fontSize="10">{shortDate(end)}</text>
   </svg>
@@ -96,8 +99,12 @@ export function CostHistoryChart({ sessionId }: { sessionId: string | null }) {
   const [selectedTime, setSelectedTime] = useState<number | null>(null)
   const [overlay, setOverlay] = useState(true)
   const [preview, setPreview] = useState<CostTimeWindow | null>(null)
-  const [burnSource, setBurnSource] = useState<'all' | BurnSource>('all')
+  const [burnSource, setBurnSource] = useState<'all' | BurnSource>('total')
   const [burnView, setBurnView] = useState<'lines' | 'bars' | 'daily'>('lines')
+  const [view, setView] = useState<'spend' | 'burn' | 'compare'>('burn')
+  const [filters, setFilters] = useState(false)
+  const [chartDetails, setChartDetails] = useState(false)
+  const [reuseDetails, setReuseDetails] = useState(false)
   const points = history?.points ?? []
   const first = points[0], last = points.at(-1)
   const rate = history?.burnRate
@@ -150,86 +157,118 @@ export function CostHistoryChart({ sessionId }: { sessionId: string | null }) {
   const codexZeroWrites = history?.groups?.some(group => (!options.group || group.id === options.group)
     && /^gpt-(6|5\.6)/.test(group.model ?? '') && group.tokens.cacheWriteTokens === 0)
 
-  return <section aria-label="Cost history" aria-busy={loading} className="mt-4 border-t pt-3" style={{ borderColor: '#475569' }}>
-    <div className="flex items-center justify-between gap-2">
-      <h3 className="font-semibold text-slate-100">Cost over time</h3>
-      <button type="button" aria-label="Cost breakdown" aria-pressed={overlay} onClick={() => setOverlay(value => !value)}
-        className="min-h-11 rounded border px-2 text-[11px] text-slate-100"
-        style={{ borderColor: overlay ? '#5eead4' : '#64748b', background: overlay ? '#134e4a' : 'transparent' }}>Breakdown</button>
-    </div>
-    <p className="break-words text-[11px] text-slate-300 [overflow-wrap:anywhere]">Cumulative · {group ? `${group.model ?? 'Model unreported'}${options.groupBy === 'model-reasoning' ? ` · ${group.reasoningEffort ?? 'effort unreported'}` : ''}` : 'main + subagents'}</p>
-    <CostAnalyticsControls options={options} history={history} onChange={changeOptions} />
-    {/* Reserve room for the range details so committing a gesture cannot move the plots. */}
-    {window && <p className="mt-2 min-h-10 text-[10px] text-slate-300">{date(start)} – {date(end)}.
-      {options.range === 'custom' ? ` Last ${options.hours}h · follows latest.` : options.range === 'window' ? ' Selected window.' : ''}
-      {options.range !== 'total' && ' Cumulative cost includes earlier usage.'}</p>}
-    {codexZeroWrites && <section aria-label="Cache write data unavailable" className="mt-2 text-[11px] text-amber-200">
-      <h4 className="font-semibold">Cache writes: Unknown</h4>
-      <p className="text-[10px]">Codex reports zero writes; write frequency, token counts and cost cannot be determined from these logs. Graphs and totals use reported counters and may omit cache-write charges.</p>
-    </section>}
-    {error && <div className="mt-2 flex items-center justify-between gap-2 text-amber-200">
-      <p>{error}</p>
-      <button type="button" aria-label="Retry cost history" onClick={retry} className="min-h-11 min-w-11 shrink-0 rounded border border-slate-500 px-2">Retry</button>
-    </div>}
-    {!history && !error && <p className="mt-3 text-slate-300">{sessionId ? 'Loading cost history…' : 'Choose a session to view its cost history.'}</p>}
-    {unavailable && <p className="mt-3 text-slate-300">Pricing is unavailable for part of this session.</p>}
-    {history && !unavailable && points.length === 0 && <p className="mt-3 text-slate-300">No dated usage yet.</p>}
-    {!unavailable && first && last && <>
-      {overlay && <div aria-label="Cost source colours" className="mt-2 flex flex-wrap gap-x-2 gap-y-1 text-[10px] text-slate-200">
-        {SOURCES.filter(source => source.key !== 'unattributed' || parts(last).unattributed > 0).map(source =>
-          <span key={source.key} className="inline-flex items-center gap-1"><span aria-hidden="true" className="inline-block h-2 w-2 rounded-sm" style={{ background: source.color }} />{source.key === 'cacheWrite' && codexZeroWrites ? 'Cache write (reported)' : source.label}</span>)}
-      </div>}
-      <p className="mt-2 text-[10px] text-slate-300">Pinch to zoom · drag sideways to pan · tap to inspect. Total resets.</p>
-      <p role="status" className="h-4 text-[10px] text-cyan-200">{preview ? 'Release to load this range.' : loading ? 'Loading cost history…' : ''}</p>
-      <HistoryPlot series={plotCosts} label="API cost over time" start={start} end={end} loaded={loaded} bounds={bounds} selectedTime={time} overlay={overlay}
-        onSelect={inspectCost} onPreview={setPreview} onCommit={changeWindow} />
-      {!!rates.length && <>
-        <h4 className="mt-2 font-semibold text-slate-100">Dollar burn rate</h4>
-        <p className="text-[11px] text-slate-300">Gradient of cumulative cost · Δcost / Δtime</p>
-        <div className="mt-2 grid grid-cols-2 gap-2">
-          <label className="min-w-0 text-[11px] text-slate-300"><span className="mb-1 block">Source</span>
-            <select aria-label="Burn rate source" value={burnSource} onChange={event => setBurnSource(event.target.value as typeof burnSource)} className="min-h-11 w-full min-w-0 rounded border border-slate-500 bg-slate-900 px-1 text-slate-100">
-              <option value="all">All sources</option><option value="total">Total</option>{SOURCES.map(source => <option key={source.key} value={source.key}>{source.label}</option>)}
-            </select>
-          </label>
-          <label className="min-w-0 text-[11px] text-slate-300"><span className="mb-1 block">View</span>
-            <select aria-label="Burn rate view" value={burnView} onChange={event => setBurnView(event.target.value as typeof burnView)} className="min-h-11 w-full min-w-0 rounded border border-slate-500 bg-slate-900 px-1 text-slate-100">
-              <option value="lines">Rate lines</option><option value="bars">Stacked bars</option><option value="daily">Today / yesterday</option>
-            </select>
-          </label>
-        </div>
-        {burnView === 'daily' ? <DailyBurnComparison sessionId={sessionId} options={options} source={burnSource === 'all' ? 'total' : burnSource}
-          sourceLabel={SOURCES.find(source => source.key === burnSource)?.label ?? 'Total'} color={SOURCES.find(source => source.key === burnSource)?.color ?? '#fde68a'} cacheWritesUnknown={!!codexZeroWrites} />
-          : <>
-            <p className="mt-2 text-[11px] text-slate-300">$/{unit.suffix} · {bucketLabel(rate!.bucketMs)} buckets{burnView === 'lines' ? ' · each source starts at zero' : ''}</p>
-            {burnSource === 'cacheWrite' && codexZeroWrites && parts(last).cacheWrite === 0 ? <p className="mt-2 text-[11px] text-amber-200">Cache-write burn is unknown for these Codex logs.</p>
-              : <HistoryPlot series={plotRates} label="API dollar burn rate" start={start} end={end} loaded={loaded} bounds={bounds} selectedTime={time} overlay={overlay}
-                bucketMs={rate!.bucketMs} rateSuffix={unit.suffix} burnSource={burnSource} rateStyle={burnView} onSelect={inspectRate} onPreview={setPreview} onCommit={changeWindow} />}
-          </>}
-      </>}
-      <input type="range" aria-label="Inspect cost history" min={0} max={points.length - 1} step={1} value={selectedIndex}
-        disabled={points.length < 2} onChange={event => selectPoint(Number(event.target.value))}
-        aria-valuetext={`${date(time)}, ${dollar(selected?.costUSD ?? 0)}${selectedRate ? `, ${dollar(selectedRate.costUSDPerMinute * unit.factor)} per ${unit.suffix}` : ''}`}
-        className="block h-11 w-full accent-cyan-300" />
-      <p className="text-[11px] text-slate-300">{date(time)}</p>
-      <div className="mt-1 flex flex-wrap justify-between gap-x-3 gap-y-1 text-[11px] tabular-nums">
-        <output aria-label="Cost at selected time" className="text-green-200">{dollar(selected?.costUSD ?? 0)}</output>
-        {selectedRate && burnView !== 'daily' && <output aria-label="Burn rate at selected time" className="text-amber-200">{burnSource === 'cacheWrite' && codexZeroWrites ? 'Unknown' : `${dollar(burnSource === 'all' || burnSource === 'total' ? selectedRate.costUSDPerMinute * unit.factor : rateParts[burnSource])}/${unit.suffix}`}</output>}
+  const burnValue = !selectedRate ? null : burnSource === 'all' || burnSource === 'total' ? selectedRate.costUSDPerMinute * unit.factor : rateParts[burnSource]
+  const unknownBurn = burnSource === 'cacheWrite' && codexZeroWrites
+  const scopeLabel = group ? `${group.model ? formatModelName(group.model) : 'Model unreported'}${options.groupBy === 'model-reasoning' ? ` · ${group.reasoningEffort ?? 'effort unreported'}` : ''}` : 'All models'
+  const short = (timestamp: number) => new Date(timestamp).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+  const clock = (timestamp: number) => new Date(timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+  const rangeLabel = short(start) === short(end) ? `${short(start)} · ${clock(start)} – ${clock(end)}` : `${short(start)} – ${short(end)}`
+  const activateView = (next: typeof view) => { setView(next); if (next === 'compare') setBurnView('daily'); else if (burnView === 'daily') setBurnView('lines') }
+
+  return <section aria-label="Cost history" aria-busy={loading}>
+    <div className="flex min-h-11 items-start justify-between gap-3">
+      <div className="min-w-0">
+        <p className="truncate text-sm text-slate-400" title={scopeLabel}>{scopeLabel}</p>
+        {view !== 'compare' && <>
+          <p className="mt-3 text-sm text-slate-300">{view === 'spend' ? 'Session spend' : 'Burn rate'}</p>
+          <output aria-label="Chart headline" className="mt-1 block text-4xl font-semibold tracking-tight text-slate-100">
+            {!history ? '—' : unavailable ? 'Unpriced' : view === 'spend' ? dollar(history.totalCostUSD ?? 0) : unknownBurn ? 'Unknown' : burnValue === null ? '—' : dollar(burnValue)}
+            {view === 'burn' && history && !unavailable && !unknownBurn && burnValue !== null && <span className="ml-1 text-lg font-normal text-slate-400">/{unit.suffix}</span>}
+          </output>
+        </>}
       </div>
-      {selectedRate && <p className="mt-1 text-[10px] text-slate-400">Bucket from {date(selectedRate.timestamp)}. Rates use full bucket durations; the latest bucket may still be filling.</p>}
-      {overlay && <table aria-label="Cost and burn rate by source" className="mt-3 w-full table-auto text-[11px]">
-        <thead><tr className="text-slate-300"><th className="pb-1 text-left font-normal">Source</th><th className="pb-1 text-right font-normal">Cost</th><th className="pb-1 text-right font-normal">$/{unit.suffix}</th></tr></thead>
-        <tbody>{SOURCES.filter(source => source.key !== 'unattributed' || costParts.unattributed > 0 || rateParts.unattributed > 0).map(source =>
-          <tr key={source.key}>
-            <th scope="row" className="py-1 text-left font-normal text-slate-200"><span aria-hidden="true" className="mr-1 inline-block h-2 w-2 rounded-sm" style={{ background: source.color }} />{source.label}</th>
-            <td className="whitespace-nowrap pl-1 text-right tabular-nums text-slate-200">{source.key === 'cacheWrite' && codexZeroWrites ? 'Unknown' : dollar(costParts[source.key])}</td>
-            <td className="whitespace-nowrap pl-1 text-right tabular-nums text-slate-200">{source.key === 'cacheWrite' && codexZeroWrites ? 'Unknown' : selectedRate ? `${dollar(rateParts[source.key])}/${unit.suffix}` : '—'}</td>
+      <button type="button" aria-label="Cost filters" aria-expanded={filters} onClick={() => setFilters(value => !value)}
+        className="min-h-11 shrink-0 rounded-lg bg-slate-800 px-3 text-sm text-slate-200">Filters</button>
+    </div>
+    <div hidden={!filters} className="mt-3 rounded-xl border border-slate-700 p-3">
+      <CostAnalyticsControls options={options} history={history} onChange={changeOptions} showRange={false} />
+      <button type="button" onClick={() => setFilters(false)} className="mt-3 min-h-11 w-full rounded-lg bg-slate-700 text-sm">Done</button>
+    </div>
+    <div role="tablist" aria-label="Cost chart" className="mt-5 grid grid-cols-3 gap-1 rounded-xl bg-slate-950/60 p-1"
+      onKeyDown={event => {
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+        event.preventDefault()
+        const keys = ['spend', 'burn', 'compare'] as const
+        const index = event.key === 'Home' ? 0 : event.key === 'End' ? 2 : (keys.indexOf(view) + (event.key === 'ArrowLeft' ? 2 : 1)) % 3
+        activateView(keys[index]); event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')[index]?.focus()
+      }}>
+      {([['spend', 'Spend'], ['burn', 'Burn'], ['compare', 'Compare']] as const).map(([key, label]) =>
+        <button key={key} type="button" role="tab" id={`cost-tab-${key}`} aria-controls={`cost-panel-${key}`} aria-selected={view === key} tabIndex={view === key ? 0 : -1} onClick={() => activateView(key)}
+          className="min-h-11 rounded-lg text-sm font-medium" style={{ background: view === key ? '#334155' : 'transparent', color: view === key ? '#f8fafc' : '#94a3b8' }}>{label}</button>)}
+    </div>
+    <div hidden={view === 'compare'}><CostTimeRangeControls options={options} onChange={changeOptions} /></div>
+    <div hidden={view === 'spend'} className="mt-3">
+      <label className="sr-only" htmlFor="burn-source">Source</label>
+      <select id="burn-source" aria-label="Burn rate source" value={burnSource} onChange={event => setBurnSource(event.target.value as typeof burnSource)}
+        className="min-h-11 w-full rounded-lg border border-slate-600 bg-slate-900 px-3 text-sm text-slate-100">
+        <option value="total">Total spend</option>{SOURCES.map(source => <option key={source.key} value={source.key}>{source.label}</option>)}<option value="all">All sources</option>
+      </select>
+    </div>
+    <section hidden={!codexZeroWrites} aria-label="Cache write data unavailable" className="mt-3 text-sm text-amber-200">
+      <details><summary className="min-h-11 cursor-pointer content-center">Cache writes: Unknown</summary>
+        <p className="mt-1 text-xs leading-relaxed">Codex reports zero writes; write frequency, token counts and cost cannot be determined from these logs. Graphs and totals use reported counters and may omit cache-write charges.</p>
+      </details>
+    </section>
+    {error && <div className="mt-3 flex items-center justify-between gap-2 text-sm text-amber-200"><p>{error}</p>
+      <button type="button" aria-label="Retry cost history" onClick={retry} className="min-h-11 rounded-lg border border-slate-500 px-3">Retry</button></div>}
+    {!history && !error && <p className="mt-4 text-sm text-slate-300">{sessionId ? 'Loading cost history…' : 'Choose a session to view its cost history.'}</p>}
+    {unavailable && <p className="mt-4 text-sm text-slate-300">Pricing is unavailable for part of this session.</p>}
+    {history && !unavailable && points.length === 0 && <p className="mt-4 text-sm text-slate-300">No dated usage yet.</p>}
+    {!unavailable && first && last && <>
+      <div hidden={view === 'compare'}>
+        <p className="mt-3 min-h-5 text-xs text-slate-400">{rangeLabel}</p>
+        <p role="status" className="h-4 text-xs text-cyan-200">{preview ? 'Release to load this range.' : loading ? 'Loading cost history…' : ''}</p>
+      </div>
+      <div hidden={view !== 'spend'} id="cost-panel-spend" role="tabpanel" aria-labelledby="cost-tab-spend">
+        <HistoryPlot series={plotCosts} label="API cost over time" start={start} end={end} loaded={loaded} bounds={bounds} selectedTime={time} inspecting={selectedTime !== null} overlay={overlay}
+          onSelect={inspectCost} onPreview={setPreview} onCommit={changeWindow} />
+        {overlay && <div aria-label="Cost source colours" className="mt-2 flex flex-wrap gap-x-3 gap-y-2 text-xs text-slate-300">
+          {SOURCES.filter(source => source.key !== 'unattributed' || parts(last).unattributed > 0).map(source =>
+            <span key={source.key} className="inline-flex items-center gap-1.5"><span aria-hidden="true" className="h-2 w-2 rounded-full" style={{ background: source.color }} />{source.key === 'cacheWrite' && codexZeroWrites ? 'Cache write (reported)' : source.label}</span>)}
+        </div>}
+      </div>
+      <div hidden={view !== 'burn'} id="cost-panel-burn" role="tabpanel" aria-labelledby="cost-tab-burn">
+        {burnSource === 'cacheWrite' && codexZeroWrites && parts(last).cacheWrite === 0 ? <p className="my-5 text-sm text-amber-200">Cache-write burn is unknown for these Codex logs.</p>
+          : !!rates.length && <HistoryPlot series={plotRates} label="API dollar burn rate" start={start} end={end} loaded={loaded} bounds={bounds} selectedTime={time} inspecting={selectedTime !== null} overlay={overlay}
+            bucketMs={rate?.bucketMs ?? 60000} rateSuffix={unit.suffix} burnSource={burnSource} rateStyle={burnView === 'bars' ? 'bars' : 'lines'} onSelect={inspectRate} onPreview={setPreview} onCommit={changeWindow} />}
+        {burnSource === 'all' && overlay && <div aria-label="Burn source colours" className="mt-2 flex flex-wrap gap-x-3 gap-y-2 text-xs text-slate-300">
+          {SOURCES.filter(source => source.key !== 'unattributed' || parts(last).unattributed > 0).map(source =>
+            <span key={source.key} className="inline-flex items-center gap-1.5"><span aria-hidden="true" className="h-2 w-2 rounded-full" style={{ background: source.color }} />{source.label}</span>)}
+        </div>}
+      </div>
+      <div hidden={view !== 'compare'} id="cost-panel-compare" role="tabpanel" aria-labelledby="cost-tab-compare">
+        {view === 'compare' && <DailyBurnComparison sessionId={sessionId} options={options} source={burnSource === 'all' ? 'total' : burnSource}
+          sourceLabel={SOURCES.find(source => source.key === burnSource)?.label ?? 'Total'} color={SOURCES.find(source => source.key === burnSource)?.color ?? '#67e8f9'} cacheWritesUnknown={!!codexZeroWrites} />}
+      </div>
+      <details open={chartDetails} onToggle={event => setChartDetails(event.currentTarget.open)} className="mt-4 border-t border-slate-700 pt-1">
+        <summary className="min-h-11 cursor-pointer content-center text-sm text-slate-300">Chart details</summary>
+        <p className="mt-2 text-xs leading-relaxed text-slate-400">{date(start)} – {date(end)}. Pinch to zoom · drag sideways to pan · tap to inspect. Total resets. Cumulative cost includes earlier usage.</p>
+        <p className="mt-1 text-xs text-slate-400">$/{unit.suffix} · {bucketLabel(rate?.bucketMs ?? 60000)} buckets. Curves join interval averages; recorded values are unchanged.</p>
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <button type="button" aria-label="Cost breakdown" aria-pressed={overlay} onClick={() => setOverlay(value => !value)} className="min-h-11 rounded-lg border border-slate-600 text-sm">Breakdown</button>
+          <select aria-label="Burn rate view" value={burnView} onChange={event => { const next = event.target.value as typeof burnView; setBurnView(next); setView(next === 'daily' ? 'compare' : 'burn') }} className="min-h-11 min-w-0 rounded-lg border border-slate-600 bg-slate-900 px-2 text-sm">
+            <option value="lines">Rate lines</option><option value="bars">Stacked bars</option><option value="daily">Today / yesterday</option>
+          </select>
+        </div>
+        <input type="range" aria-label="Inspect cost history" min={0} max={points.length - 1} step={1} value={selectedIndex} disabled={points.length < 2}
+          onChange={event => selectPoint(Number(event.target.value))} aria-valuetext={`${date(time)}, ${dollar(selected.costUSD)}`} className="mt-2 block h-11 w-full accent-cyan-300" />
+        <p className="text-xs text-slate-400">{date(time)}</p>
+        <div className="mt-2 flex flex-wrap justify-between gap-3 text-sm tabular-nums">
+          <output aria-label="Cost at selected time" className="text-green-200">{dollar(selected.costUSD)}</output>
+          {selectedRate && <output aria-label="Burn rate at selected time" className="text-amber-200">{unknownBurn ? 'Unknown' : `${dollar(burnValue!)}/${unit.suffix}`}</output>}
+        </div>
+        {selectedRate && <p className="mt-1 text-xs text-slate-400">Bucket from {date(selectedRate.timestamp)}. Rates use full bucket durations; the latest bucket may still be filling.</p>}
+        {overlay && <table aria-label="Cost and burn rate by source" className="mt-3 w-full text-xs">
+          <thead><tr className="text-slate-400"><th className="pb-2 text-left font-normal">Source</th><th className="pb-2 text-right font-normal">Cost</th><th className="pb-2 text-right font-normal">$/{unit.suffix}</th></tr></thead>
+          <tbody>{SOURCES.filter(source => source.key !== 'unattributed' || costParts.unattributed > 0 || rateParts.unattributed > 0).map(source => <tr key={source.key}>
+            <th scope="row" className="py-2 text-left font-normal text-slate-200">{source.label}</th>
+            <td className="whitespace-nowrap pl-1 text-right text-slate-200">{source.key === 'cacheWrite' && codexZeroWrites ? 'Unknown' : dollar(costParts[source.key])}</td>
+            <td className="whitespace-nowrap pl-1 text-right text-slate-200">{source.key === 'cacheWrite' && codexZeroWrites ? 'Unknown' : selectedRate ? `${dollar(rateParts[source.key])}/${unit.suffix}` : '—'}</td>
           </tr>)}</tbody>
-      </table>}
+        </table>}
+      </details>
     </>}
-    {!!history?.untimedCostUSD && <p className="mt-2 text-[11px] text-slate-300">
-      {dollar(history.untimedCostUSD)} has no recorded timestamp and is included in the total above, outside these graphs.
-    </p>}
-    {history?.cacheReuse && <CacheReusePanel analytics={history.cacheReuse} />}
+    {!!history?.untimedCostUSD && <p className="mt-3 text-xs text-slate-400">{dollar(history.untimedCostUSD)} has no recorded timestamp and is included in the total above, outside these graphs.</p>}
+    {history?.cacheReuse && <details open={reuseDetails} onToggle={event => setReuseDetails(event.currentTarget.open)} className="mt-2 border-t border-slate-700 pt-1"><summary className="min-h-11 cursor-pointer content-center text-sm text-slate-300">Cache reuse by agent</summary><CacheReusePanel analytics={history.cacheReuse} /></details>}
   </section>
 }

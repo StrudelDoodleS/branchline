@@ -334,12 +334,16 @@ async def reported_usage_costs(page):
     await expect(header).to_contain_text('23k tokens used')
     await page.get_by_role('button', name='$Cost', exact=True).click()
     panel = page.get_by_role('region', name='Session API costs')
+    await cost_tools(panel, tab='Spend', wait=False)
     await expect(panel).to_be_visible()
     for text in ['4,000', '2,000', '16,000', '600', '400']:
         await expect(panel.get_by_text(text, exact=True)).to_be_visible()
     box = await panel.bounding_box()
     assert box['x'] >= 0 and box['x'] + box['width'] <= page.viewport_size['width']
-    assert box['y'] >= (await header.bounding_box())['y'] + (await header.bounding_box())['height']
+    if page.viewport_size['width'] >= 640:
+        assert box['y'] >= (await header.bounding_box())['y'] + (await header.bounding_box())['height']
+    else:
+        assert box['y'] == 0 and box['height'] == page.viewport_size['height']
     assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     if page.viewport_size['width'] == 390:
         await page.screenshot(path='/tmp/branchline-api-costs-phone.png')
@@ -399,6 +403,21 @@ async def agent_status_filters(page):
         await page.screenshot(path='/tmp/branchline-agent-status-phone.png')
 
 
+async def cost_tools(panel, tab='Spend', wait=True):
+    """Exercise retained advanced tools through the new disclosures."""
+    await panel.get_by_role('tab',name=tab,exact=True).click()
+    if wait:
+        await expect(panel.get_by_label('Chart headline',exact=True)).not_to_have_text('—')
+    filters=panel.get_by_role('button',name='Cost filters',exact=True)
+    if await filters.get_attribute('aria-expanded') == 'false':
+        await filters.click()
+    for label in ['Chart details','Cache reuse by agent','Session totals']:
+        summary=panel.locator('summary').filter(has_text=re.compile('^'+re.escape(label)+'$'))
+        if await summary.count() and not await summary.evaluate('element=>element.parentElement.open'):
+            await summary.click()
+    await panel.evaluate('element=>{element.scrollTop=0}')
+
+
 async def cost_history_graph(page):
     requests = []
     async def history_route(route):
@@ -411,7 +430,8 @@ async def cost_history_graph(page):
     await page.route('**/session-cost-history?*', history_route)
     await page.get_by_role('button', name='$Cost', exact=True).click()
     panel = page.get_by_role('region', name='Session API costs')
-    chart = panel.get_by_role('img', name='API cost over time', exact=True)
+    await cost_tools(panel, tab='Spend')
+    chart = panel.get_by_role('img', name='API cost over time', exact=True, include_hidden=True)
     await expect(chart).to_be_visible()
     readout = panel.get_by_label('Cost at selected time', exact=True)
     await expect(readout).to_contain_text('$2.50')
@@ -449,8 +469,9 @@ async def cost_history_retry(page):
     panel = page.get_by_role('region', name='Session API costs')
     await panel.get_by_role('button', name='Retry cost history', exact=True).click()
     await expect(panel.get_by_text('No dated usage yet.', exact=True)).to_be_visible()
+    await expect(panel.get_by_label('Chart headline',exact=True)).to_have_text('—')
     await expect(panel).to_contain_text('$2.50 has no recorded timestamp')
-    await expect(panel.get_by_role('img', name='API cost over time', exact=True)).to_have_count(0)
+    await expect(panel.get_by_role('img', name='API cost over time', exact=True, include_hidden=True)).to_have_count(0)
 
 
 async def cost_burn_breakdown(page):
@@ -464,16 +485,18 @@ async def cost_burn_breakdown(page):
         untimedCostUSD=0, totalCostUSD=4, unpricedResponses=0)))))
     await page.get_by_role('button', name='$Cost', exact=True).click()
     panel = page.get_by_role('region', name='Session API costs')
-    rate = panel.get_by_role('img', name='API dollar burn rate', exact=True)
+    await cost_tools(panel, tab='Burn')
+    await panel.get_by_role('combobox',name='Burn rate source',exact=True).select_option('all')
+    rate = panel.get_by_role('img', name='API dollar burn rate', exact=True, include_hidden=True)
     await expect(rate).to_be_visible()
     await expect(panel).to_contain_text('1 min buckets')
     slider = panel.get_by_role('slider', name='Inspect cost history', exact=True)
     await slider.fill('1')
     await expect(panel.get_by_label('Cost at selected time', exact=True)).to_contain_text('$3.00')
-    await expect(panel.get_by_label('Burn rate at selected time', exact=True)).to_contain_text('$2.00/min')
+    await expect(panel.get_by_label('Burn rate at selected time', exact=True)).to_contain_text('$120.00/hr')
     sources = panel.get_by_role('table', name='Cost and burn rate by source')
     await expect(sources.get_by_role('row', name=re.compile('Input'))).to_contain_text('$0.60')
-    await expect(sources.get_by_role('row', name=re.compile('Input'))).to_contain_text('$0.40/min')
+    await expect(sources.get_by_role('row', name=re.compile('Input'))).to_contain_text('$24.00/hr')
     for name in ['Output', 'Cache read', 'Cache write']:
         await expect(sources.get_by_role('row', name=re.compile(name))).to_be_visible()
     overlay = panel.get_by_role('button', name='Cost breakdown', exact=True)
@@ -486,7 +509,7 @@ async def cost_burn_breakdown(page):
     await expect(panel.locator('[aria-label="Burn rate source overlay"]')).to_have_count(1)
     box = await rate.bounding_box()
     await rate.click(position=dict(x=box['width']*0.66, y=box['height']*0.5))
-    await expect(panel.get_by_label('Burn rate at selected time', exact=True)).to_contain_text('$0.00/min')
+    await expect(panel.get_by_label('Burn rate at selected time', exact=True)).to_contain_text('$0.00/hr')
     assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     for control in [slider, overlay]:
         box = await control.bounding_box()
@@ -567,6 +590,7 @@ async def cost_model_analytics(page):
     await page.route('**/session-cost-history?*', history_route)
     await page.get_by_role('button', name='$Cost', exact=True).click()
     panel = page.get_by_role('region', name='Session API costs')
+    await cost_tools(panel, tab='Spend')
     grouping = panel.get_by_role('combobox', name='Group costs by', exact=True)
     resolution = panel.get_by_role('combobox', name='Cost time resolution', exact=True)
     await expect(grouping).to_be_visible(timeout=3000)
@@ -604,7 +628,10 @@ async def cost_model_analytics(page):
     assert requests[-1]['range'] == ['total']
     panel_box = await panel.bounding_box()
     playback_box = await page.get_by_role('button', name=re.compile('Review$')).locator('..').bounding_box()
-    assert panel_box['y'] + panel_box['height'] <= playback_box['y'], 'Cost panel overlaps bottom playback controls'
+    if page.viewport_size['width'] >= 640:
+        assert panel_box['y'] + panel_box['height'] <= playback_box['y'], 'Cost panel overlaps bottom playback controls'
+    else:
+        assert panel_box['y'] == 0 and panel_box['height'] == page.viewport_size['height']
     for control in [grouping, resolution, selected, total_view, recent_view]:
         box = await control.bounding_box()
         assert box and box['height'] >= 44 and box['x'] >= 0 and box['x']+box['width'] <= page.viewport_size['width']
@@ -612,6 +639,54 @@ async def cost_model_analytics(page):
     if page.viewport_size['width'] == 390:
         await panel.evaluate('element => {element.scrollTop = 0}')
         await page.screenshot(path='/tmp/branchline-cost-analytics-phone.png')
+
+
+async def cost_readable_layout(page):
+    start = 1792490400000
+    zero = dict(input=0, output=0, cacheRead=0, cacheWrite=0, unattributed=0)
+    history = dict(points=[dict(timestamp=start,costUSD=1,breakdownUSD=dict(zero,input=1)),
+                           dict(timestamp=start+3600000,costUSD=4,breakdownUSD=dict(zero,input=4))],
+                   totalCostUSD=4,untimedCostUSD=0,unpricedResponses=0,groups=[],
+                   burnRate=dict(bucketMs=60000,endTimestamp=start+3600000,points=[
+                       dict(timestamp=start+i*60000,costUSDPerMinute=value,breakdownUSDPerMinute=dict(zero,input=value))
+                       for i,value in enumerate([0.1,0.2,0.05,0.12]+[0.06]*56+[0.17])]))
+    await page.route('**/session-cost-history?*', lambda route: route.fulfill(status=200,content_type='application/json',body=json.dumps(dict(sessionId='phone-primary',history=history))))
+    await page.get_by_role('button',name='$Cost',exact=True).click()
+    panel = page.get_by_role('region',name='Session API costs')
+    assert await panel.evaluate('element=>element.contains(document.activeElement)'), 'Focus must enter the cost view'
+    await expect(panel.get_by_role('tab',name='Burn',exact=True)).to_have_attribute('aria-selected','true')
+    await expect(panel.get_by_role('img')).to_have_count(1)
+    await expect(panel.get_by_role('img',name='API dollar burn rate',exact=True, include_hidden=True)).to_be_visible()
+    await expect(panel.get_by_role('combobox',name='Burn rate source',exact=True)).to_have_value('total')
+    await expect(panel.get_by_role('combobox',name='Group costs by',exact=True)).to_have_count(0)
+    await expect(panel.get_by_role('table',name='Cost and burn rate by source')).to_have_count(0)
+    await expect(panel.get_by_role('region',name='Cache reuse',exact=True)).to_have_count(0)
+    path = panel.get_by_role('img').locator('path[data-source="total"]')
+    assert 'C' in await path.get_attribute('d')
+    await panel.get_by_role('tab',name='Spend',exact=True).click()
+    await expect(panel.get_by_role('img')).to_have_count(1)
+    await expect(panel.get_by_role('img',name='API cost over time',exact=True, include_hidden=True)).to_be_visible()
+    await panel.get_by_role('button',name='Cost filters',exact=True).click()
+    await expect(panel.get_by_role('combobox',name='Group costs by',exact=True)).to_be_visible()
+    await panel.get_by_role('button',name='Cost filters',exact=True).click()
+    if page.viewport_size['width'] < 640:
+        box=await panel.bounding_box()
+        assert box['x']==0 and box['y']==0 and abs(box['height']-page.viewport_size['height'])<=1,box
+    assert await panel.evaluate("element=>getComputedStyle(element).fontFamily.includes('sans')")
+    for tab in await panel.get_by_role('tab').all():
+        box=await tab.bounding_box()
+        assert box['height']>=44
+    assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    if page.viewport_size['width']==390:
+        await panel.get_by_role('tab',name='Burn',exact=True).click()
+        await page.screenshot(path='/tmp/branchline-readable-phone.png')
+    await panel.get_by_role('button',name='Close API costs',exact=True).focus()
+    if page.viewport_size['width'] < 640:
+        await page.keyboard.press('Shift+Tab')
+        assert await panel.evaluate('element=>element.contains(document.activeElement)')
+    await page.keyboard.press('Escape')
+    await expect(panel).to_have_count(0)
+    await expect(page.get_by_role('button',name='$Cost',exact=True)).to_be_focused()
 
 
 async def cost_burn_trends(page):
@@ -658,9 +733,10 @@ async def cost_burn_trends(page):
     await page.route('**/session-cost-history?*', history_route)
     await page.get_by_role('button', name='$Cost', exact=True).click()
     panel = page.get_by_role('region', name='Session API costs')
+    await cost_tools(panel, tab='Burn')
     source = panel.get_by_role('combobox', name='Burn rate source', exact=True)
     await source.select_option('cacheWrite')
-    chart = panel.get_by_role('img', name='API dollar burn rate', exact=True)
+    chart = panel.get_by_role('img', name='API dollar burn rate', exact=True, include_hidden=True)
     await expect(chart.locator('path[data-source="cacheWrite"]')).to_have_count(1)
     box = await chart.bounding_box()
     assert box['height'] >= 190, box
@@ -742,6 +818,7 @@ async def cost_cache_reuse(page):
     await page.route('**/session-cost-history?*', history_route)
     await page.get_by_role('button', name='$Cost', exact=True).click()
     panel = page.get_by_role('region', name='Session API costs')
+    await cost_tools(panel, tab='Spend')
     reuse = panel.get_by_role('region', name='Cache reuse', exact=True)
     await expect(reuse).to_be_visible()
     await expect(reuse.get_by_role('group')).to_have_count(10)
@@ -808,6 +885,7 @@ async def cost_cache_write_unknown(page):
     await page.route('**/session-cost-history?*', history_route)
     await page.get_by_role('button', name='$Cost', exact=True).click()
     panel = page.get_by_role('region', name='Session API costs')
+    await cost_tools(panel, tab='Spend')
     unknown = panel.get_by_role('region', name='Cache write data unavailable', exact=True)
     await expect(unknown).to_be_visible()
     await expect(unknown).to_contain_text('Cache writes: Unknown')
@@ -853,11 +931,12 @@ async def cost_time_views(page):
     await page.route('**/session-cost-history?*',history_route)
     await page.get_by_role('button',name='$Cost',exact=True).click()
     panel = page.get_by_role('region',name='Session API costs')
+    await cost_tools(panel, tab='Spend')
     total = panel.get_by_role('button',name='Show total cost history',exact=True)
     hour = panel.get_by_role('button',name='Show last hour cost history',exact=True)
     two_hours = panel.get_by_role('button',name='Show last 2 hours cost history',exact=True)
     resolution = panel.get_by_role('combobox',name='Cost time resolution',exact=True)
-    description = panel.get_by_role('img',name='API cost over time',exact=True).locator('desc')
+    description = panel.get_by_role('img',name='API cost over time',exact=True, include_hidden=True).locator('desc')
     async def expect_start(timestamp):
         label = await page.evaluate("timestamp => new Date(timestamp).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})",timestamp)
         await expect(description).to_contain_text(label)
@@ -925,12 +1004,13 @@ async def cost_phone_gestures(page):
     await page.route('**/session-cost-history?*',history_route)
     await page.get_by_role('button',name='$Cost',exact=True).click()
     panel = page.get_by_role('region',name='Session API costs')
+    await cost_tools(panel, tab='Spend')
     hours = panel.get_by_role('spinbutton',name='Last hours',exact=True)
     await expect(hours).to_be_visible()
     await hours.fill('3.5')
     await panel.get_by_role('button',name='Apply last hours',exact=True).click()
-    cost = panel.get_by_role('img',name='API cost over time',exact=True)
-    burn = panel.get_by_role('img',name='API dollar burn rate',exact=True)
+    cost = panel.get_by_role('img',name='API cost over time',exact=True, include_hidden=True)
+    burn = panel.get_by_role('img',name='API dollar burn rate',exact=True, include_hidden=True)
     await expect(cost).to_have_attribute('data-window-start',str(latest-12600000))
     assert requests[-1]['range']==['custom'] and requests[-1]['hours']==['3.5']
     await panel.get_by_role('combobox',name='Cost time resolution',exact=True).select_option('day')
@@ -1015,8 +1095,10 @@ async def cost_phone_gestures(page):
         preview = [float(await cost.get_attribute(f'data-window-{edge}')) for edge in ['start', 'end']]
         await delayed_range(lambda: touches('touchEnd',[]), preview)
         query = requests[-1]
-        assert abs(float(query['start'][0])-(first+5*86400000)) < 20, query
-        assert abs(float(query['end'][0])-(first+15*86400000)) < 20, query
+        # Fractional touch coordinates vary by tiny subpixel amounts across widths.
+        # A quarter second over this ten-day view is still far below one pixel.
+        assert abs(float(query['start'][0])-(first+5*86400000)) < 250, query
+        assert abs(float(query['end'][0])-(first+15*86400000)) < 250, query
         await expect(cost).to_have_attribute('data-window-start',query['start'][0])
         await expect(burn).to_have_attribute('data-window-start',query['start'][0])
         await expect(cost).to_have_attribute('data-window-end',query['end'][0])
@@ -1036,8 +1118,8 @@ async def cost_phone_gestures(page):
         await delayed_range(lambda: touches('touchEnd',[]), preview)
         query = requests[-1]
         start, end = float(query['start'][0]),float(query['end'][0])
-        assert abs(start-(first+3*86400000)) < 30, query
-        assert abs(end-start-10*86400000) < 30, query
+        assert abs(start-(first+3*86400000)) < 250, query
+        assert abs(end-start-10*86400000) < 250, query
         await expect(cost).to_have_attribute('data-window-start',query['start'][0])
         await expect(burn).to_have_attribute('data-window-end',query['end'][0])
         # Native vertical scrolling must cancel the pending chart gesture.
@@ -1087,7 +1169,9 @@ async def cost_phone_gestures(page):
     await cost.press('+')
     await expect(cost).to_have_attribute('data-window-start',str(first+5*86400000))
     await expect(panel.get_by_role('region',name='Cost history')).to_have_attribute('aria-busy','false')
-    await total.scroll_into_view_if_needed()
+    # Center the button clear of the sticky header before recording the
+    # pending-request geometry; browser click scrolling is not a data redraw.
+    await total.evaluate("element => element.scrollIntoView({block:'center', inline:'nearest'})")
     await delayed_range(lambda: total.click())
     await expect(cost).to_have_attribute('data-window-start',str(first))
     await expect(burn).to_have_attribute('data-window-end',str(latest))
@@ -1159,8 +1243,9 @@ async def cost_history_pending_queries(page):
         await page.route('**/session-cost-history?*', history_route)
         await page.get_by_role('button', name='$Cost', exact=True).click()
         panel = page.get_by_role('region', name='Session API costs')
-        cost = panel.get_by_role('img', name='API cost over time', exact=True)
-        burn = panel.get_by_role('img', name='API dollar burn rate', exact=True)
+        await cost_tools(panel, tab='Spend')
+        cost = panel.get_by_role('img', name='API cost over time', exact=True, include_hidden=True)
+        burn = panel.get_by_role('img', name='API dollar burn rate', exact=True, include_hidden=True)
         value = panel.get_by_label('Cost at selected time', exact=True)
         await expect(value).to_have_text('$4.00')
         original_cost, original_burn = await cost.element_handle(), await burn.element_handle()
@@ -1257,7 +1342,7 @@ async def main():
             launch["executable_path"] = os.environ["PLAYWRIGHT_CHROMIUM_EXECUTABLE"]
         browser = await playwright.chromium.launch(**launch)
         for width in [360, 390, 1280]:
-            for check in [tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, agent_status_filters, cost_history_graph, cost_history_retry, cost_burn_breakdown, cost_burn_trends, agent_model_settings, cost_model_analytics, cost_cache_reuse, cost_cache_write_unknown, cost_time_views, cost_phone_gestures, cost_history_pending_queries]:
+            for check in [tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, agent_status_filters, cost_history_graph, cost_history_retry, cost_burn_breakdown, cost_burn_trends, cost_readable_layout, agent_model_settings, cost_model_analytics, cost_cache_reuse, cost_cache_write_unknown, cost_time_views, cost_phone_gestures, cost_history_pending_queries]:
                 if requested and check.__name__ not in requested:
                     continue
                 context = await browser.new_context(viewport=dict(width=width, height=844), is_mobile=width < 640, has_touch=width < 640)
