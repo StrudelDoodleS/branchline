@@ -93,7 +93,7 @@ function HistoryPlot({ series: data, label, start, end, loaded, bounds, selected
   </svg>
 }
 
-export function CostHistoryChart({ sessionId }: { sessionId: string | null }) {
+export function CostHistoryChart({ sessionId, initialComparisonDay }: { sessionId: string | null; initialComparisonDay?: string }) {
   const [options, setOptions] = useState<CostHistoryOptions>({ groupBy: 'model', resolution: 'auto', range: 'total' })
   const { history, error, retry, loading, isPreviousData } = useCostHistory(sessionId, options)
   const [selectedTime, setSelectedTime] = useState<number | null>(null)
@@ -238,7 +238,7 @@ export function CostHistoryChart({ sessionId }: { sessionId: string | null }) {
       </div>
     </>}
     <div hidden={view !== 'compare' || unavailable} id="cost-panel-compare" role="tabpanel" aria-labelledby="cost-tab-compare">
-      <DailyBurnComparison sessionId={sessionId} options={options} source={burnSource === 'all' ? 'total' : burnSource} enabled={view === 'compare' && !!history && !unavailable}
+      <DailyBurnComparison sessionId={sessionId} options={options} source={burnSource === 'all' ? 'total' : burnSource} enabled={view === 'compare' && !!history && !unavailable} initialDay={initialComparisonDay}
         sourceLabel={SOURCES.find(source => source.key === burnSource)?.label ?? 'Total'} cacheWritesUnknown={!!codexZeroWrites} />
     </div>
     {!unavailable && first && last && <>

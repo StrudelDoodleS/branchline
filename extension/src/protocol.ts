@@ -35,6 +35,10 @@ export interface SessionInfo {
   status: 'active' | 'completed'
   startTime: number
   lastActivityTime: number
+  runtime?: 'claude' | 'codex'
+  provider?: string
+  historical?: boolean
+  project?: string
 }
 
 // ─── Extension → Webview Messages ────────────────────────────────────────────

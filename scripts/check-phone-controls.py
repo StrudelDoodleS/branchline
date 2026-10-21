@@ -35,6 +35,101 @@ def recording():
     ])
 
 
+async def session_history_browser(page):
+    await page.evaluate('window.__phoneEventSources.forEach(source=>source.close())')
+    now = await page.evaluate('Date.now()')
+    day = 86400000
+    live = [dict(id='phone-primary',label='Solver review',status='active',startTime=now-5*day,lastActivityTime=now-4*day,runtime='claude',provider='anthropic'),
+            dict(id='phone-other',label='Other project',status='completed',startTime=now-day,lastActivityTime=now-3600000,runtime='codex',provider='openai')]
+    await page.evaluate("sessions=>window.postMessage({type:'session-list',sessions},'*')",live)
+    picker=page.get_by_role('combobox',name='Main session',exact=True)
+    await expect(picker.locator('option').first).to_have_attribute('value','phone-other')
+    old_time=await page.evaluate('new Date(2026,9,1,14).getTime()')
+    old_start=await page.evaluate('new Date(2026,8,21).getTime()')
+    saved=[dict(id='old-claude',label='Editor specification',status='completed',startTime=old_start,lastActivityTime=old_time,runtime='claude',provider='anthropic',historical=True,project='superglm'),
+           dict(id='old-codex',label='Inference suite',status='completed',startTime=1785542400000,lastActivityTime=1785628800000,runtime='codex',provider='openai',historical=True,project='superlss')]
+    catalog_calls=[]
+    async def catalog_route(route):
+        catalog_calls.append(route.request.url)
+        await route.fulfill(status=200,content_type='application/json',body=json.dumps(dict(sessions=saved)))
+    await page.route('**/session-catalog*',catalog_route)
+    resumed = False
+    async def replay_route(route):
+        if 'old-claude' not in route.request.url: await route.fallback(); return
+        events = [dict(type='agent_spawn',payload=dict(name='Orchestrator',isMain=True,task='Editor specification',runtime='claude'),time=0,sessionId='old-claude',streamId='resumed-live',eventId=1),
+                  dict(type='message',payload=dict(agent='Orchestrator',role='assistant',content='Archive resumed'),time=1,sessionId='old-claude',streamId='resumed-live',eventId=2)] if resumed else []
+        await route.fulfill(status=200,content_type='application/json',body=json.dumps(dict(streamId='resumed-live' if resumed else 'saved-old',throughEventId=2 if resumed else 0,events=events)))
+    await page.route('**/session-events?*',replay_route)
+    zero=dict(input=0,output=0,cacheRead=0,cacheWrite=0,unattributed=0)
+    async def history_route(route):
+        q=parse_qs(urlparse(route.request.url).query)
+        assert q['sessionId']==['old-claude']
+        start,end=(int(q['start'][0]),int(q['end'][0])) if q.get('fixedWindow')==['true'] else (old_start,old_time)
+        h=dict(points=[dict(timestamp=old_start,costUSD=0.25,breakdownUSD=dict(zero,input=0.25))],totalCostUSD=0.25,untimedCostUSD=0,unpricedResponses=0,groups=[],
+               window=dict(start=start,end=end,startCostUSD=0,startBreakdownUSD=zero),burnRate=dict(bucketMs=3600000,endTimestamp=end,points=[dict(timestamp=t,costUSDPerMinute=0.1,breakdownUSDPerMinute=dict(zero,input=0.1)) for t in range(start,end,3600000)]))
+        await route.fulfill(status=200,content_type='application/json',body=json.dumps(dict(sessionId='old-claude',history=h)))
+    await page.route('**/session-cost-history?*',history_route)
+    assert not catalog_calls,'Saved history should load only when requested'
+    await page.get_by_role('button',name='Browse sessions',exact=True).click()
+    await expect(picker.locator('option[value="old-claude"]')).to_have_count(1)
+    provider=page.get_by_role('combobox',name='Session provider',exact=True)
+    activity=page.get_by_role('combobox',name='Session last activity',exact=True)
+    await provider.select_option('anthropic')
+    await activity.select_option('custom')
+    await page.get_by_label('Sessions active from',exact=True).fill('2026-09-01')
+    await page.get_by_label('Sessions active through',exact=True).fill('2026-10-10')
+    await page.get_by_role('searchbox',name='Search sessions',exact=True).fill('SUPERGLM')
+    await expect(page.get_by_label('Session matches',exact=True)).to_contain_text('1 matching')
+    await expect(picker.locator('option[value="old-codex"]')).to_have_count(0)
+    await expect(picker).to_have_value('phone-primary')
+    assert await page.evaluate('document.documentElement.scrollWidth<=innerWidth')
+    if page.viewport_size['width']==390:
+        await page.screenshot(path='/tmp/branchline-session-browser-phone.png')
+    await picker.select_option('old-claude')
+    panel=page.get_by_role('region',name='Session API costs',exact=True)
+    await expect(panel).to_be_visible()
+    await expect(panel.get_by_label('Source day',exact=True)).to_have_value('2026-10-01')
+    await expect(panel.get_by_role('img',name='Daily burn rate comparison',exact=True)).to_be_visible()
+    await panel.get_by_role('tab',name='Spend',exact=True).click()
+    await expect(panel.get_by_label('Chart headline',exact=True)).to_have_text('$0.25')
+    # Live session list refreshes and new sessions must not dislodge saved analytics.
+    await page.evaluate("sessions=>window.postMessage({type:'session-list',sessions},'*')",live)
+    await page.evaluate("session=>window.postMessage({type:'session-started',session},'*')",dict(id='new-live',label='New work',status='active',startTime=now,lastActivityTime=now))
+    await expect(picker).to_have_value('old-claude')
+    await expect(panel.get_by_label('Chart headline',exact=True)).to_have_text('$0.25')
+    await panel.get_by_role('button',name='Close API costs',exact=True).click()
+    await expect(picker).to_have_value('old-claude')
+    # Resuming this same archive must adopt its real relay stream, while the
+    # unrelated started session above must leave the archive selected.
+    resumed = True
+    await page.evaluate("session=>window.postMessage({type:'session-started',session},'*')",dict(saved[0],historical=False,status='active',lastActivityTime=now))
+    main=page.get_by_role('button',name='Monitor main session',exact=True)
+    await expect(main).to_contain_text('Editor specification')
+    await main.click()
+    activity_panel=page.get_by_role('region',name='Agent activity',exact=True)
+    await expect(activity_panel.get_by_text('Archive resumed',exact=True)).to_be_visible()
+    await page.evaluate("event=>window.postMessage({type:'agent-event',event},'*')",dict(type='message',payload=dict(agent='Orchestrator',role='assistant',content='New live line'),time=2,sessionId='old-claude',streamId='resumed-live',eventId=3))
+    await expect(activity_panel.get_by_text('New live line',exact=True)).to_be_visible()
+
+
+async def session_catalog_retry(page):
+    attempts=[]
+    async def catalog_route(route):
+        attempts.append(route.request.url)
+        await route.fulfill(status=503 if len(attempts)==1 else 200,content_type='application/json',body=json.dumps(dict(sessions=[])))
+    await page.route('**/session-catalog*',catalog_route)
+    await page.get_by_role('button',name='Browse sessions',exact=True).click()
+    await expect(page.get_by_text('Could not load saved sessions. Your recent sessions are still available.',exact=True)).to_be_visible()
+    await expect(page.get_by_role('combobox',name='Main session',exact=True)).to_have_value('phone-primary')
+    await page.get_by_role('button',name='Refresh saved sessions',exact=True).click()
+    await expect(page.get_by_text('Could not load saved sessions. Your recent sessions are still available.',exact=True)).to_have_count(0)
+    await expect(page.get_by_label('Session matches',exact=True)).to_contain_text('2 matching')
+    assert len(attempts)==2
+    await page.evaluate("window.postMessage({type:'session-list',sessions:[]},'*')")
+    await expect(page.get_by_role('combobox',name='Main session',exact=True)).to_have_value('')
+    await expect(page.get_by_role('button',name='Browse sessions',exact=True)).to_be_visible()
+
+
 async def tree_hierarchy(page):
     tree = page.get_by_role("navigation", name="Session agent tree")
     await expect(tree).to_be_visible(timeout=3000)
@@ -1443,7 +1538,7 @@ async def main():
             launch["executable_path"] = os.environ["PLAYWRIGHT_CHROMIUM_EXECUTABLE"]
         browser = await playwright.chromium.launch(**launch)
         for width in [360, 390, 1280]:
-            for check in [tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, agent_status_filters, cost_history_graph, cost_history_retry, cost_burn_breakdown, cost_burn_trends, cost_multi_day_comparison, cost_readable_layout, agent_model_settings, cost_model_analytics, cost_cache_reuse, cost_cache_write_unknown, cost_time_views, cost_phone_gestures, cost_history_pending_queries]:
+            for check in [session_history_browser, session_catalog_retry, tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, agent_status_filters, cost_history_graph, cost_history_retry, cost_burn_breakdown, cost_burn_trends, cost_multi_day_comparison, cost_readable_layout, agent_model_settings, cost_model_analytics, cost_cache_reuse, cost_cache_write_unknown, cost_time_views, cost_phone_gestures, cost_history_pending_queries]:
                 if requested and check.__name__ not in requested:
                     continue
                 context = await browser.new_context(viewport=dict(width=width, height=844), is_mobile=width < 640, has_touch=width < 640)
@@ -1468,7 +1563,7 @@ async def main():
                         }
                         return originalStroke.call(this,x,y,width,height);
                       };""")
-                if check in [reconnect_refreshes_selected_history, new_stream_live_during_reconnect]:
+                if check in [session_history_browser, reconnect_refreshes_selected_history, new_stream_live_during_reconnect]:
                     await page.add_init_script("""window.__phoneEventSources = [];
                       const NativeEventSource = window.EventSource;
                       window.EventSource = class extends NativeEventSource {

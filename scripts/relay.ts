@@ -26,6 +26,7 @@ import type { TelemetryClient } from './telemetry'
 import { SessionReplayStore } from './session-replay'
 import { claudeContextPayload } from '../extension/src/claude-context'
 import { buildCostHistory, normalizeCostHistoryOptions } from '../extension/src/token-usage'
+import { SessionCatalog } from './session-catalog'
 
 const MAX_EVENT_BUFFER = 5000
 const DISCOVERY_DIR = path.join(os.homedir(), '.claude', 'agent-flow')
@@ -96,11 +97,13 @@ function broadcastEvent(event: AgentEvent) {
   broadcast(JSON.stringify({ type: 'agent-event', event: recorded }))
 }
 
-function broadcastSessionLifecycle(type: 'started' | 'ended' | 'updated', sessionId: string, label: string) {
+function broadcastSessionLifecycle(type: 'started' | 'ended' | 'updated', sessionId: string, label: string, runtime: 'claude' | 'codex' = 'claude', details?: SessionInfo) {
   if (type === 'started') {
     broadcast(JSON.stringify({
       type: 'session-started',
-      session: { id: sessionId, label, status: 'active', startTime: Date.now(), lastActivityTime: Date.now() } as SessionInfo,
+      session: { id: sessionId, label, status: 'active', startTime: runtime === 'claude' ? sessions.get(sessionId)?.sessionStartTime ?? Date.now() : Date.now(),
+        lastActivityTime: runtime === 'claude' ? sessions.get(sessionId)?.lastActivityTime ?? Date.now() : Date.now(),
+        runtime, provider: runtime === 'claude' ? 'anthropic' : 'openai', ...details } as SessionInfo,
     }))
   } else if (type === 'ended') {
     broadcast(JSON.stringify({ type: 'session-ended', sessionId }))
@@ -150,12 +153,12 @@ const watcherDelegate = {
   resetInactivityTimer: (sessionId: string) => resetInactivityTimer(sessionId),
 }
 
-function resetInactivityTimer(sessionId: string) {
+function resetInactivityTimer(sessionId: string, activityTime = Date.now()) {
   const session = sessions.get(sessionId)
   if (!session) return
 
   const wasCompleted = session.sessionCompleted
-  session.lastActivityTime = Date.now()
+  session.lastActivityTime = activityTime
   session.sessionCompleted = false
 
   if (wasCompleted) {
@@ -188,6 +191,7 @@ function resetInactivityTimer(sessionId: string) {
 }
 
 function watchSession(sessionId: string, filePath: string) {
+  const stat = fs.statSync(filePath)
   const defaultLabel = `Session ${sessionId.slice(0, SESSION_ID_DISPLAY)}`
   const session: WatchedSession = {
     sessionId, filePath,
@@ -197,7 +201,7 @@ function watchSession(sessionId: string, filePath: string) {
     seenToolUseIds: new Set(),
     seenMessageHashes: new Set(),
     sessionDetected: false, sessionCompleted: false,
-    lastActivityTime: Date.now(),
+    lastActivityTime: stat.mtimeMs,
     inactivityTimer: null,
     subagentWatchers: new Map(),
     spawnedSubagents: new Set(),
@@ -211,7 +215,6 @@ function watchSession(sessionId: string, filePath: string) {
   }
   sessions.set(sessionId, session)
 
-  const stat = fs.statSync(filePath)
   const catchUpEntries = parser.prescanExistingContent(filePath, stat.size, session)
   session.fileSize = stat.size
   parser.extractSessionLabel(catchUpEntries, session)
@@ -241,7 +244,11 @@ function watchSession(sessionId: string, filePath: string) {
 
   session.subagentsDir = path.join(path.dirname(filePath), sessionId, 'subagents')
   scanSubagentsDir(watcherDelegate, parser, sessionId)
-  resetInactivityTimer(sessionId)
+  let lastActivity = stat.mtimeMs
+  for (const childFile of session.subagentWatchers.keys()) {
+    try { lastActivity = Math.max(lastActivity, fs.statSync(childFile).mtimeMs) } catch { /* Child may have been removed. */ }
+  }
+  resetInactivityTimer(sessionId, lastActivity)
 
   log(`[session] Watching ${sessionId.slice(0, SESSION_ID_DISPLAY)} — "${session.label}"`)
 }
@@ -350,7 +357,9 @@ function removeDiscoveryFile() {
 export interface Relay {
   /** Handle an incoming SSE connection */
   handleSSE: (req: http.IncomingMessage, res: http.ServerResponse) => void
-  handleSessionReplay: (req: http.IncomingMessage, res: http.ServerResponse) => void
+  handleSessionReplay: (req: http.IncomingMessage, res: http.ServerResponse) => Promise<void>
+  handleCostHistory: (req: http.IncomingMessage, res: http.ServerResponse) => Promise<void>
+  handleSessionCatalog: (req: http.IncomingMessage, res: http.ServerResponse) => Promise<void>
   /** Clean up all resources */
   dispose: () => void
 }
@@ -387,6 +396,7 @@ export async function createRelay(options: RelayOptions): Promise<Relay> {
   const mode = resolveRuntimeMode(options.runtime)
   const wantClaude = mode === 'claude' || mode === 'auto'
   const wantCodex = mode === 'codex' || mode === 'auto'
+  const sessionCatalog = new SessionCatalog({ includeClaude: wantClaude, includeCodex: wantCodex })
   log(`[relay] Runtime mode: ${mode} (watching: ${[wantClaude && 'claude', wantCodex && 'codex'].filter(Boolean).join(', ')})`)
 
   let hookServer: HookServer | null = null
@@ -432,7 +442,8 @@ export async function createRelay(options: RelayOptions): Promise<Relay> {
     codexWatcher = new CodexSessionWatcher(workspace)
     codexWatcher.onEvent((event) => broadcastEvent(event))
     codexWatcher.onSessionLifecycle((lifecycle) => {
-      broadcastSessionLifecycle(lifecycle.type, lifecycle.sessionId, lifecycle.label)
+      const details = lifecycle.type === 'started' ? codexWatcher?.getActiveSessions().find(session => session.id === lifecycle.sessionId) : undefined
+      broadcastSessionLifecycle(lifecycle.type, lifecycle.sessionId, lifecycle.label, 'codex', details)
     })
     codexWatcher.start()
   }
@@ -491,6 +502,7 @@ export async function createRelay(options: RelayOptions): Promise<Relay> {
           id: session.sessionId, label: session.label,
           status: session.sessionCompleted ? 'completed' : 'active',
           startTime: session.sessionStartTime, lastActivityTime: session.lastActivityTime,
+          runtime: 'claude', provider: 'anthropic',
         })
       }
       if (codexWatcher) sessionList.push(...codexWatcher.getActiveSessions())
@@ -499,12 +511,7 @@ export async function createRelay(options: RelayOptions): Promise<Relay> {
       }
 
       // Replay buffered events for the most recent active session
-      const sorted = [...sessionList].sort((a, b) => {
-        const aActive = a.status === 'active' ? 1 : 0
-        const bActive = b.status === 'active' ? 1 : 0
-        if (aActive !== bActive) return bActive - aActive
-        return b.lastActivityTime - a.lastActivityTime
-      })
+      const sorted = [...sessionList].sort((a, b) => b.lastActivityTime - a.lastActivityTime)
       if (sorted.length > 0) {
         const buffered = eventBuffer.get(sorted[0].id)
         if (buffered) {
@@ -513,22 +520,46 @@ export async function createRelay(options: RelayOptions): Promise<Relay> {
       }
     },
 
-    handleSessionReplay(req: http.IncomingMessage, res: http.ServerResponse) {
+    async handleSessionReplay(req: http.IncomingMessage, res: http.ServerResponse) {
       const sessionId = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams.get('sessionId')
-      const replay = sessionId ? eventBuffer.get(sessionId) : undefined
-      res.writeHead(replay ? 200 : 404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-      res.end(JSON.stringify(replay ?? { error: 'Session history is unavailable' }))
+      try {
+        const replay = sessionId ? eventBuffer.get(sessionId) : undefined
+        // Saved usage can be inspected without inventing an agent activity replay.
+        const saved = !replay && sessionId && (await sessionCatalog.list()).some(session => session.id === sessionId)
+        res.writeHead(replay || saved ? 200 : 404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+        res.end(JSON.stringify(replay ?? (saved ? { streamId: `saved-${sessionId}`, throughEventId: 0, events: [] } : { error: 'Session history is unavailable' })))
+      } catch {
+        res.writeHead(500, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify({ error: 'Session history is unavailable' }))
+      }
     },
 
-    handleCostHistory(req: http.IncomingMessage, res: http.ServerResponse) {
+    async handleSessionCatalog(req: http.IncomingMessage, res: http.ServerResponse) {
+      try {
+        const force = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams.get('refresh') === '1'
+        const saved = await sessionCatalog.list(force)
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify({ sessions: saved }))
+      } catch {
+        res.writeHead(500, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify({ error: 'Saved sessions are unavailable' }))
+      }
+    },
+
+    async handleCostHistory(req: http.IncomingMessage, res: http.ServerResponse) {
       const params = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams
       const sessionId = params.get('sessionId')
       const options = normalizeCostHistoryOptions(Object.fromEntries(params))
       const session = sessionId ? sessions.get(sessionId) : undefined
-      const history = session ? buildCostHistory(session.usageLedger?.costRecords() ?? [], 240, session.sessionCompleted ? undefined : Date.now(), options)
-        : sessionId ? codexWatcher?.getCostHistory(sessionId, options) : undefined
-      res.writeHead(history ? 200 : 404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-      res.end(JSON.stringify(history ? { sessionId, history } : { error: 'Cost history is unavailable' }))
+      try {
+        let history = session ? buildCostHistory(session.usageLedger?.costRecords() ?? [], 240, session.sessionCompleted ? undefined : Date.now(), options)
+          : sessionId ? codexWatcher?.getCostHistory(sessionId, options) : undefined
+        if (!history && sessionId) {
+          const records = await sessionCatalog.records(sessionId)
+          if (records) history = buildCostHistory(records, 240, undefined, options)
+        }
+        res.writeHead(history ? 200 : 404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+        res.end(JSON.stringify(history ? { sessionId, history } : { error: 'Cost history is unavailable' }))
+      } catch {
+        res.writeHead(500, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify({ error: 'Could not load saved session costs' }))
+      }
     },
 
     dispose() {

@@ -100,6 +100,7 @@ export class SessionWatcher implements AgentSessionWatcher {
       status: s.sessionCompleted ? 'completed' : 'active',
       startTime: s.sessionStartTime,
       lastActivityTime: s.lastActivityTime,
+      runtime: 'claude', provider: 'anthropic',
     }))
   }
 

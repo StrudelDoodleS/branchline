@@ -58,12 +58,14 @@ interface WatchedCodexSession {
   parser: CodexRolloutParser
   parentId: string | null
   displayName: string
+  provider?: string
 }
 
 interface SessionMetadata {
   cwd: string | null
   parentId: string | null
   displayName: string
+  provider?: string
 }
 
 function codexHome(): string {
@@ -132,7 +134,7 @@ function readSessionMetadata(filePath: string): SessionMetadata | null {
       const data = Buffer.concat(chunks)
       const line = data.subarray(0, end >= 0 ? end : data.length).toString('utf-8')
       const parsed = JSON.parse(line) as { type?: string; payload?: {
-        cwd?: string; agent_path?: string; agent_nickname?: string
+        cwd?: string; agent_path?: string; agent_nickname?: string; model_provider?: string
         source?: { subagent?: { thread_spawn?: { parent_thread_id?: string; agent_path?: string; agent_nickname?: string } } }
       } }
       if (parsed.type !== 'session_meta') return null
@@ -143,6 +145,7 @@ function readSessionMetadata(filePath: string): SessionMetadata | null {
         cwd: typeof payload?.cwd === 'string' ? payload.cwd : null,
         parentId: typeof spawn?.parent_thread_id === 'string' ? spawn.parent_thread_id : null,
         displayName: agentPath ? path.posix.basename(agentPath) : payload?.agent_nickname ?? spawn?.agent_nickname ?? 'Subagent',
+        provider: typeof payload?.model_provider === 'string' ? payload.model_provider : undefined,
       }
     } finally { fs.closeSync(fd) }
   } catch { return null }
@@ -193,6 +196,7 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
       status: this.groupIsActive(s.sessionId) ? 'active' : 'completed',
       startTime: s.sessionStartTime,
       lastActivityTime: Math.max(...Array.from(this.sessions.values()).filter(member => this.rootSession(member.sessionId)?.sessionId === s.sessionId).map(member => member.lastActivityTime)),
+      runtime: 'codex', provider: s.provider ?? 'openai',
     }))
   }
 
@@ -385,7 +389,7 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
   }
 
   private indexSessionFiles(): void {
-    const folders = [sessionsRoot()]
+    const folders = [sessionsRoot(), path.join(codexHome(), 'archived_sessions')]
     while (folders.length > 0) {
       const folder = folders.pop()!
       let entries: fs.Dirent[]
@@ -502,12 +506,15 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
       parser,
       parentId,
       displayName: metadata?.displayName ?? 'Subagent',
+      provider: metadata?.provider,
     }
     this.sessions.set(sessionId, session)
     if (!restoring) this.reviveInactiveAncestors(session)
 
     // Drain existing content first, so late-opening panels see full history.
     this.readNewLines(sessionId, restoring)
+    // Initial parsing is a historical read, not fresh agent activity.
+    session.lastActivityTime = stat.mtimeMs
 
     session.sessionDetected = true
     if (!parentId) {

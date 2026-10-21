@@ -31,8 +31,8 @@ function DayHistory({ sessionId, options, window, enabled, live, onResult }: {
   return null
 }
 
-export function DailyBurnComparison({ sessionId, options, source, sourceLabel, cacheWritesUnknown, enabled = true }: {
-  sessionId: string | null; options: CostHistoryOptions; source: BurnSource; sourceLabel: string; cacheWritesUnknown: boolean; enabled?: boolean;
+export function DailyBurnComparison({ sessionId, options, source, sourceLabel, cacheWritesUnknown, enabled = true, initialDay }: {
+  sessionId: string | null; options: CostHistoryOptions; source: BurnSource; sourceLabel: string; cacheWritesUnknown: boolean; enabled?: boolean; initialDay?: string;
 }) {
   const [cutoff, setCutoff] = useState(() => Math.floor(Date.now() / 60000) * 60000)
   useEffect(() => {
@@ -43,7 +43,7 @@ export function DailyBurnComparison({ sessionId, options, source, sourceLabel, c
     return () => clearInterval(timer)
   }, [enabled])
   const today = localDay(cutoff)
-  const [chosenSource, setChosenSource] = useState<string | null>(null)
+  const [chosenSource, setChosenSource] = useState<string | null>(initialDay ?? null)
   const [chosenDays, setChosenDays] = useState<string[] | null>(null)
   const [matched, setMatched] = useState(false)
   const [selected, setSelected] = useState<number | null>(null)

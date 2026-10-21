@@ -28,9 +28,11 @@ import { AgentTreeView } from "./agent-tree-view"
 import { UsagePanel } from "./usage-panel"
 import { sessionUsage } from "@/lib/usage"
 import { useAudioEffects } from "@/hooks/use-audio-effects"
+import { localDay } from "@/hooks/burn-comparison"
 
 export function AgentVisualizer() {
   const bridge = useVSCodeBridge()
+  const selectedSessionInfo = bridge.sessions.find(session => session.id === bridge.selectedSessionId)
 
   const {
     frameRef,
@@ -439,7 +441,9 @@ export function AgentVisualizer() {
       />
 
       {/* Timeline panel (slide-in from bottom) */}
-      <UsagePanel visible={showCostOverlay} agents={agents} sessionId={bridge.selectedSessionId} onClose={() => setShowCostOverlay(false)} />
+      <UsagePanel visible={showCostOverlay} agents={agents} sessionId={bridge.selectedSessionId} sessionLabel={selectedSessionInfo?.label}
+        initialComparisonDay={selectedSessionInfo?.historical ? localDay(selectedSessionInfo.lastActivityTime) : undefined}
+        onClose={() => setShowCostOverlay(false)} />
 
       <TimelinePanel
         visible={showTimeline}
@@ -461,7 +465,10 @@ export function AgentVisualizer() {
         sessions={bridge.sessions}
         selectedSessionId={bridge.selectedSessionId}
         sessionsWithActivity={bridge.sessionsWithActivity}
-        onSelectSession={bridge.selectSession}
+        onSelectSession={(id, saved) => {
+          bridge.selectSession(id, saved)
+          if (saved?.historical) { setShowFileAttention(false); setShowTranscript(false); setShowCostOverlay(true) }
+        }}
         onCloseSession={handleCloseSession}
         isVSCode={bridge.isVSCode}
         connectionStatus={bridge.connectionStatus}

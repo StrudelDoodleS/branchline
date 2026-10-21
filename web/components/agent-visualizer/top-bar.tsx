@@ -88,7 +88,7 @@ export interface TopBarProps {
   sessions: SessionInfo[]
   selectedSessionId: string | null
   sessionsWithActivity: Set<string>
-  onSelectSession: (id: string) => void
+  onSelectSession: (id: string, saved?: SessionInfo) => void
   onCloseSession: (id: string) => void
   // Connection
   isVSCode: boolean
@@ -137,7 +137,6 @@ export const TopBar = memo(function TopBar({
       style={{ zIndex: Z.info, background: '#0f172a', borderColor: '#475569', color: '#e2e8f0' }}
     >
       {/* Session tabs — scrollable, takes available space */}
-      {sessions.length > 0 && (
         <div className="min-w-0 w-full">
           <SessionTabs
             sessions={sessions}
@@ -145,9 +144,9 @@ export const TopBar = memo(function TopBar({
             sessionsWithActivity={sessionsWithActivity}
             onSelectSession={onSelectSession}
             onCloseSession={onCloseSession}
+            allowHistory={!isVSCode}
           />
         </div>
-      )}
 
       <div className="flex min-w-0 flex-wrap items-center gap-2 sm:gap-4">
         <div role="group" aria-label="View" className="flex gap-1">
