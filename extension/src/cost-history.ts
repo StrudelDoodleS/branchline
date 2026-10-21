@@ -1,9 +1,13 @@
 // Branchline fork modifications; see FORK.md.
 import type { TokenCounts } from './token-usage'
 import { clampCostWindow, type CostTimeWindow } from './cost-window'
+import { buildCacheReuse, type CacheReuseAnalytics } from './cache-reuse'
 
 export interface CostBreakdown { input: number; output: number; cacheRead: number; cacheWrite: number; unattributed: number }
 export interface CostRecord {
+  agentId?: string
+  agentName?: string
+  kind?: string
   timestamp?: number
   costUSD: number | null
   breakdownUSD?: CostBreakdown
@@ -35,6 +39,7 @@ export interface CostGroup {
   averageCostUSDPerMinute: number | null
 }
 export interface CostHistory {
+  cacheReuse?: CacheReuseAnalytics
   points: CostHistoryPoint[]
   burnRate: { bucketMs: number; endTimestamp?: number; points: BurnRatePoint[] }
   untimedCostUSD: number
@@ -124,11 +129,13 @@ export function buildCostHistory(source: Iterable<CostRecord>, maxPoints = 240, 
   const history: CostHistory = { points: [], burnRate: { bucketMs: 60000, points: [] }, untimedCostUSD,
     totalCostUSD: unpricedResponses ? null : total, unpricedResponses, groups,
     groupBy: options.groupBy, group: options.group, resolution: options.resolution, range: options.range }
-  if (!Number.isFinite(first)) return history
+  const include = (record: CostRecord) => !options.group || groupId(record, options.groupBy!) === options.group
+  if (!Number.isFinite(first)) { history.cacheReuse = buildCacheReuse(records, undefined, include); return history }
   history.bounds = { start: first, end: latest }
   const duration = options.range === '1h' ? 3600000 : options.range === '2h' ? 7200000 : options.range === 'custom' ? options.hours! * 3600000 : undefined
   const { start, end } = options.range === 'window' ? clampCostWindow({ start: options.start!, end: options.end! }, history.bounds)
     : { start: duration === undefined ? first : Math.max(0, latest - duration), end: latest }
+  history.cacheReuse = buildCacheReuse(records, { start, end }, include)
   let bucketMs = options.resolution === 'day' ? 86400000 : options.resolution === 'hour' ? 3600000 : 60000
   const minimumWidth = Math.max(1, (end - start) / (limit - 1) / bucketMs)
   const magnitude = 10 ** Math.floor(Math.log10(minimumWidth))

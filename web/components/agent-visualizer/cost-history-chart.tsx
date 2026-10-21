@@ -9,6 +9,7 @@ import { normalizeCostHistoryOptions } from '../../../extension/src/cost-history
 import type { CostTimeWindow } from '../../../extension/src/cost-window'
 import type { CostBreakdown, CostHistoryPoint, CostHistoryOptions } from '../../../extension/src/token-usage'
 import { CostAnalyticsControls, costDollar as dollar, costRateUnit } from './cost-analytics-controls'
+import { CacheReusePanel } from './cache-reuse-panel'
 
 const LEFT = 42, RIGHT = 292, TOP = 12, BOTTOM = 96
 const SOURCES = [
@@ -195,5 +196,6 @@ export function CostHistoryChart({ sessionId }: { sessionId: string | null }) {
     {!!history?.untimedCostUSD && <p className="mt-2 text-[11px] text-slate-300">
       {dollar(history.untimedCostUSD)} has no recorded timestamp and is included in the total above, outside these graphs.
     </p>}
+    {history?.cacheReuse && <CacheReusePanel analytics={history.cacheReuse} />}
   </section>
 }

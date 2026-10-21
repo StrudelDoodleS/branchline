@@ -209,7 +209,9 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
     if (!this.sessions.has(sessionId)) return
     const members = [...this.sessions.values()].filter(member => this.rootSession(member.sessionId)?.sessionId === sessionId)
     function* records(): IterableIterator<CostRecord> {
-      for (const member of members) yield* member.rolloutState.usage.costRecords()
+      for (const member of members) for (const record of member.rolloutState.usage.costRecords()) {
+        yield { ...record, agentId: member.sessionId, agentName: member.parentId ? member.displayName : 'Main session' }
+      }
     }
     return buildCostHistory(records(), 240, this.isSessionActive(sessionId) ? Date.now() : undefined, options)
   }

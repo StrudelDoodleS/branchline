@@ -173,6 +173,7 @@ export class UsageLedger {
       const callTokens = emptyCounts()
       for (const key of KEYS) callTokens[key] = call[key]
       records.push({ model: callModel || undefined, reasoningEffort: callEffort, tokens: callTokens,
+        ...('kind' in call && call.kind ? { kind: call.kind } : {}),
         timestamp: old?.timestamp ?? at, costUSD: parts ? sumBreakdown(parts) : null, breakdownUSD: parts ?? undefined })
       if (!parts) breakdown = null
       else if (breakdown) addBreakdown(breakdown, parts)
@@ -200,7 +201,9 @@ export class UsageLedger {
   }
 
   *costRecords(): IterableIterator<CostRecord> {
-    for (const response of this.responses.values()) yield* response.records
+    for (const response of this.responses.values()) for (const record of response.records) {
+      yield { ...record, agentId: response.agent, agentName: response.agent.toLowerCase() === 'orchestrator' ? 'Main session' : response.agent }
+    }
   }
 
   snapshot(agent: string): UsageTotals | undefined {

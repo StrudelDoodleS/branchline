@@ -50,7 +50,7 @@ describe('Codex cumulative API usage', () => {
         : { type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: usage, last_token_usage: usage } } }
       parser.processLine(JSON.stringify({ ...record, timestamp: '2026-10-18T10:00:00Z' }), state)
       assert.deepEqual([...state.usage.costRecords()], [{ timestamp: Date.parse('2026-10-18T10:00:00Z'), costUSD: 0.0148,
-        model: 'gpt-6.1-sol', reasoningEffort: 'max',
+        model: 'gpt-6.1-sol', reasoningEffort: 'max', agentId: 'orchestrator', agentName: 'Main session',
         tokens: { inputTokens: 2000, outputTokens: 1000, cacheReadTokens: 8000, cacheWriteTokens: 0, cacheWrite1hTokens: 0, reasoningTokens: 0 },
         breakdownUSD: { input: 0.004, output: 0.01, cacheRead: 0.0008, cacheWrite: 0, unattributed: 0 } }])
     }

@@ -614,6 +614,85 @@ async def cost_model_analytics(page):
         await page.screenshot(path='/tmp/branchline-cost-analytics-phone.png')
 
 
+async def cost_cache_reuse(page):
+    end = 1792584000000
+    zero = dict(input=0, output=0, cacheRead=0, cacheWrite=0, unattributed=0)
+    def counts(input, read, write=0):
+        return dict(inputTokens=input, cacheReadTokens=read, cacheWriteTokens=write,
+                    cacheWrite1hTokens=0, outputTokens=0, reasoningTokens=0)
+    async def history_route(route):
+        query = parse_qs(urlparse(route.request.url).query)
+        recent = query.get('range', ['total'])[0] == '1h'
+        selected = query.get('group', [''])[0]
+        groups = [dict(id=json.dumps([model, None], separators=(',', ':')), model=model,
+                       records=2, tokens=counts(1000, 9000), totalTokens=10000,
+                       costUSD=2, knownCostUSD=2, breakdownUSD=zero, averageCostUSDPerMinute=0.1)
+                  for model in ['gpt-6.1-sol', 'claude-opus-5-5']]
+        event = dict(timestamp=end, model='gpt-6.1-sol', reasoningEffort='max', gapMs=34560000,
+                     cacheHitPercent=3.6, previousCacheHitPercent=99.3, uncachedInputTokens=325090,
+                     cacheReadTokens=12032, cacheWriteTokens=0, inputCostUSD=1.30036, cacheWriteCostUSD=0)
+        review = dict(agentId='review', agentName='Review phone controls with a very long descriptive agent name',
+                      records=2, uncachedInputTokens=325100, cacheReadTokens=22000, cacheWriteTokens=0,
+                      cacheHitPercent=6.3, inputCostUSD=1.31, knownInputCostUSD=1.31,
+                      cacheWriteCostUSD=0, cacheWritesUnknown=True, longGapRecords=1,
+                      afterLongGapInputCostUSD=1.30036, knownAfterLongGapInputCostUSD=1.30036,
+                      costliest=[event], afterLongGaps=[event])
+        main = dict(review, agentId='main', agentName='Main session', records=1, uncachedInputTokens=100,
+                    inputCostUSD=0.1, knownInputCostUSD=0.1, cacheWriteTokens=100000,
+                    cacheWriteCostUSD=0.5, cacheWritesUnknown=False, longGapRecords=0,
+                    afterLongGapInputCostUSD=0, knownAfterLongGapInputCostUSD=0,
+                    costliest=[dict(event, model='claude-opus-5-5', gapMs=None, previousCacheHitPercent=None,
+                                   inputCostUSD=0.1, uncachedInputTokens=100, cacheWriteTokens=100000, cacheWriteCostUSD=0.5)],
+                    afterLongGaps=[])
+        agents = [review, main] + [dict(main, agentId=f'other-{i}', agentName=f'Other reviewer {i}') for i in range(10)]
+        if selected == groups[0]['id']:
+            agents = [review]
+        elif selected == groups[1]['id']:
+            agents = [main]
+        if recent:
+            agents = [dict(agent, inputCostUSD=0.2, knownInputCostUSD=0.2) for agent in agents]
+        history = dict(points=[dict(timestamp=end, costUSD=4, breakdownUSD=dict(zero, input=4))],
+                       totalCostUSD=4, untimedCostUSD=0, unpricedResponses=0, groups=groups,
+                       burnRate=dict(bucketMs=60000, points=[]), bounds=dict(start=end-86400000, end=end),
+                       window=dict(start=end-3600000 if recent else end-86400000, end=end,
+                                   startCostUSD=0, startBreakdownUSD=zero),
+                       cacheReuse=dict(longGapMs=600000, agents=agents, undatedRecords=1, missingTokenRecords=0))
+        await route.fulfill(status=200, content_type='application/json', body=json.dumps(dict(sessionId='phone-primary', history=history)))
+    await page.route('**/session-cost-history?*', history_route)
+    await page.get_by_role('button', name='$Cost', exact=True).click()
+    panel = page.get_by_role('region', name='Session API costs')
+    reuse = panel.get_by_role('region', name='Cache reuse', exact=True)
+    await expect(reuse).to_be_visible()
+    await expect(reuse.get_by_role('group')).to_have_count(10)
+    await reuse.get_by_role('button', name='Show more agents in cache reuse', exact=True).click()
+    await expect(reuse.get_by_role('group')).to_have_count(12)
+    await expect(panel.get_by_role('region', name='Cache write data unavailable')).to_be_visible()
+    await expect(reuse.get_by_role('group', name='Cache reuse for Main session', exact=True)).to_contain_text('$0.50')
+    review = reuse.get_by_role('group', name='Cache reuse for Review phone controls with a very long descriptive agent name', exact=True)
+    await review.locator('summary').click()
+    await expect(review).to_contain_text('99.3% → 3.6%')
+    await expect(review).to_contain_text('9h 36m')
+    await expect(review).to_contain_text('325,090')
+    await expect(review).to_contain_text('$1.30')
+    await expect(review).to_contain_text('Unknown')
+    await reuse.get_by_role('combobox', name='Cache reuse records', exact=True).select_option('after-gap')
+    await expect(reuse.get_by_role('group', name='Cache reuse for Main session', exact=True)).to_have_count(0)
+    if page.viewport_size['width'] == 390:
+        await reuse.scroll_into_view_if_needed()
+        await page.screenshot(path='/tmp/branchline-cache-reuse-phone.png')
+    await reuse.get_by_role('combobox', name='Cache reuse records', exact=True).select_option('costliest')
+    await panel.get_by_role('button', name='Filter costs for Opus 5.5', exact=True).click()
+    await expect(review).to_have_count(0)
+    await expect(reuse).to_contain_text('Main session')
+    await expect(panel.get_by_role('region', name='Cache write data unavailable')).to_have_count(0)
+    await panel.get_by_role('button', name='Show last hour cost history', exact=True).click()
+    await expect(reuse).to_contain_text('$0.20')
+    assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    for control in await reuse.get_by_role('combobox').all() + await reuse.locator('summary').all():
+        box = await control.bounding_box()
+        assert box and box['height'] >= 44
+
+
 async def cost_cache_write_unknown(page):
     first, latest = 1790812800000, 1790812800000 + 7200000
     sol = '["gpt-6.1-sol",null]'
@@ -1097,7 +1176,7 @@ async def main():
             launch["executable_path"] = os.environ["PLAYWRIGHT_CHROMIUM_EXECUTABLE"]
         browser = await playwright.chromium.launch(**launch)
         for width in [360, 390, 1280]:
-            for check in [tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, agent_status_filters, cost_history_graph, cost_history_retry, cost_burn_breakdown, agent_model_settings, cost_model_analytics, cost_cache_write_unknown, cost_time_views, cost_phone_gestures, cost_history_pending_queries]:
+            for check in [tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, agent_status_filters, cost_history_graph, cost_history_retry, cost_burn_breakdown, agent_model_settings, cost_model_analytics, cost_cache_reuse, cost_cache_write_unknown, cost_time_views, cost_phone_gestures, cost_history_pending_queries]:
                 if requested and check.__name__ not in requested:
                     continue
                 context = await browser.new_context(viewport=dict(width=width, height=844), is_mobile=width < 640, has_touch=width < 640)

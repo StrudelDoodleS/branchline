@@ -24,6 +24,11 @@ test('groups nested Codex threads and keeps ancestors alive while a descendant w
     const records = [
       { type: 'session_meta', payload: { id, cwd: directory, source } },
       { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: `Task for ${name}` }] } },
+      { type: 'turn_context', payload: { model: 'gpt-6.1-sol' } },
+      { type: 'event_msg', timestamp: date.toISOString(), payload: { type: 'token_count', info: {
+        total_token_usage: { input_tokens: 1000, cached_input_tokens: 900, output_tokens: 10 },
+        last_token_usage: { input_tokens: 1000, cached_input_tokens: 900, output_tokens: 10 },
+      } } },
     ]
     const file = path.join(folder, `rollout-${day}T00-00-00-${id}.jsonl`)
     fs.writeFileSync(file, records.map(record => JSON.stringify(record)).join('\n') + '\n')
@@ -39,6 +44,12 @@ test('groups nested Codex threads and keeps ancestors alive while a descendant w
   try {
     watcher.start()
     assert.deepEqual(watcher.getActiveSessions().map(session => session.id), [main])
+    const reuse = watcher.getCostHistory(main)!.cacheReuse!
+    assert.equal(reuse.agents.length, 3, 'Each Codex thread retains its own cost ownership')
+    assert.deepEqual(reuse.agents.map(agent => [agent.agentId, agent.agentName]).sort(), [
+      [main, 'Main session'], [child, 'reviewer'], [grandchild, 'tests'],
+    ])
+    assert.ok(reuse.agents.every(agent => agent.costliest[0].gapMs === null), 'First calls cannot inherit another thread’s predecessor')
     const spawn = events.find(event => event.type === 'agent_spawn' && event.payload.name === child)
     assert.equal(spawn?.sessionId, main)
     assert.equal(spawn?.payload.parent, 'orchestrator')
