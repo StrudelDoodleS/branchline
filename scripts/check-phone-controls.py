@@ -614,6 +614,87 @@ async def cost_model_analytics(page):
         await page.screenshot(path='/tmp/branchline-cost-analytics-phone.png')
 
 
+async def cost_burn_trends(page):
+    hour = 3600000
+    await page.clock.install()
+    cutoff = await page.evaluate('new Date(2026,9,21,10,30).getTime()')
+    midnight = await page.evaluate('new Date(2026,9,21).getTime()')
+    await page.evaluate('value => { window.__burnNow = value; Date.now = () => window.__burnNow }', cutoff)
+    rollover = asyncio.Event()
+    rollover.set()
+    zero = dict(input=0, output=0, cacheRead=0, cacheWrite=0, unattributed=0)
+    opus = '["claude-opus-5-5",null]'
+    codex = '["gpt-6.1-sol",null]'
+    async def history_route(route):
+        query = parse_qs(urlparse(route.request.url).query)
+        selected = query.get('group', [''])[0]
+        is_codex = selected == codex
+        groups = [dict(id=key, model=model, records=2, tokens=dict(inputTokens=100, outputTokens=0,
+                      cacheReadTokens=0 if is_codex else 1000, cacheWriteTokens=write, cacheWrite1hTokens=0, reasoningTokens=0),
+                      totalTokens=1100+write, costUSD=20, knownCostUSD=20, breakdownUSD=zero, averageCostUSDPerMinute=0.1)
+                  for key, model, write in [(opus, 'claude-opus-5-5', 1000), (codex, 'gpt-6.1-sol', 0)]]
+        if query.get('fixedWindow') == ['true']:
+            start, end = int(query['start'][0]), int(query['end'][0])
+            if start > midnight:
+                await rollover.wait()
+            unit_cost = 2 if start == midnight else 4
+            rates = [dict(timestamp=start+i*hour, costUSDPerMinute=unit_cost*(0.5 if i == 10 else 1)/60,
+                          breakdownUSDPerMinute=dict(zero, input=unit_cost*(0.5 if i == 10 else 1)/60) if is_codex else
+                          dict(zero, cacheWrite=unit_cost*(0.5 if i == 10 else 1)/60)) for i in range(11)]
+            history = dict(points=[], totalCostUSD=21, unpricedResponses=0, untimedCostUSD=0, groups=groups,
+                           window=dict(start=start, end=end, startCostUSD=0, startBreakdownUSD=zero),
+                           burnRate=dict(bucketMs=hour, endTimestamp=end, points=rates))
+        else:
+            part = dict(zero, input=3, cacheWrite=1)
+            history = dict(points=[dict(timestamp=midnight, costUSD=1, breakdownUSD=dict(zero,cacheWrite=1)),
+                                   dict(timestamp=cutoff, costUSD=4, breakdownUSD=part)],
+                           totalCostUSD=4, unpricedResponses=0, untimedCostUSD=0, groups=groups,
+                           bounds=dict(start=midnight-hour*24, end=cutoff),
+                           window=dict(start=midnight,end=cutoff,startCostUSD=0,startBreakdownUSD=zero),
+                           burnRate=dict(bucketMs=hour,endTimestamp=cutoff,points=[
+                               dict(timestamp=midnight+i*hour,costUSDPerMinute=1/60,
+                                    breakdownUSDPerMinute=dict(zero,input=0.8/60,cacheWrite=0.2/60)) for i in range(11)]))
+        await route.fulfill(status=200,content_type='application/json',body=json.dumps(dict(sessionId='phone-primary',history=history)))
+    await page.route('**/session-cost-history?*', history_route)
+    await page.get_by_role('button', name='$Cost', exact=True).click()
+    panel = page.get_by_role('region', name='Session API costs')
+    source = panel.get_by_role('combobox', name='Burn rate source', exact=True)
+    await source.select_option('cacheWrite')
+    chart = panel.get_by_role('img', name='API dollar burn rate', exact=True)
+    await expect(chart.locator('path[data-source="cacheWrite"]')).to_have_count(1)
+    box = await chart.bounding_box()
+    assert box['height'] >= 190, box
+    await panel.get_by_role('combobox', name='Burn rate view', exact=True).select_option('daily')
+    daily = panel.get_by_role('region', name='Daily burn comparison', exact=True)
+    await expect(daily).to_contain_text('50% lower')
+    await expect(daily).to_contain_text('$21.00')
+    await expect(daily).to_contain_text('$42.00')
+    await expect(daily.get_by_role('img',name='Today and yesterday burn rate',exact=True)).to_be_visible()
+    await expect(daily.locator('path[data-period="today"]')).to_have_attribute('data-scale-max','4')
+    await expect(daily.locator('path[data-period="yesterday"]')).to_have_attribute('data-scale-max','4')
+    if page.viewport_size['width'] == 390:
+        await daily.scroll_into_view_if_needed()
+        await page.screenshot(path='/tmp/branchline-burn-trends-phone.png')
+    # The old day must not become "Today" when the next day's requests lag.
+    rollover.clear()
+    try:
+        await page.evaluate('value => { window.__burnNow = value }', midnight+24*hour+120000)
+        await page.clock.fast_forward(60000)
+        await expect(daily).to_contain_text('Loading both days')
+        await expect(daily.get_by_role('img')).to_have_count(0)
+    finally:
+        rollover.set()
+    await expect(daily.get_by_role('img')).to_be_visible()
+    await panel.get_by_role('button',name='Filter costs for GPT-6.1-sol',exact=True).click()
+    await expect(daily).to_contain_text('Cache-write burn is unknown')
+    await expect(daily.get_by_role('img')).to_have_count(0)
+    await expect(panel.get_by_role('region',name='Cache write data unavailable')).to_be_visible()
+    assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    for control in [source, panel.get_by_role('combobox', name='Burn rate view', exact=True)]:
+        box = await control.bounding_box()
+        assert box and box['height'] >= 44
+
+
 async def cost_cache_reuse(page):
     end = 1792584000000
     zero = dict(input=0, output=0, cacheRead=0, cacheWrite=0, unattributed=0)
@@ -1176,7 +1257,7 @@ async def main():
             launch["executable_path"] = os.environ["PLAYWRIGHT_CHROMIUM_EXECUTABLE"]
         browser = await playwright.chromium.launch(**launch)
         for width in [360, 390, 1280]:
-            for check in [tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, agent_status_filters, cost_history_graph, cost_history_retry, cost_burn_breakdown, agent_model_settings, cost_model_analytics, cost_cache_reuse, cost_cache_write_unknown, cost_time_views, cost_phone_gestures, cost_history_pending_queries]:
+            for check in [tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, agent_status_filters, cost_history_graph, cost_history_retry, cost_burn_breakdown, cost_burn_trends, agent_model_settings, cost_model_analytics, cost_cache_reuse, cost_cache_write_unknown, cost_time_views, cost_phone_gestures, cost_history_pending_queries]:
                 if requested and check.__name__ not in requested:
                     continue
                 context = await browser.new_context(viewport=dict(width=width, height=844), is_mobile=width < 640, has_touch=width < 640)

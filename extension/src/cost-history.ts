@@ -25,6 +25,8 @@ export interface CostHistoryOptions {
   hours?: number
   start?: number
   end?: number
+  /** Preserve the requested interval, including quiet time. End is exclusive. */
+  fixedWindow?: boolean
 }
 export interface CostGroup {
   id: string
@@ -77,6 +79,7 @@ export function normalizeCostHistoryOptions(raw: Record<string, unknown> = {}): 
     : raw.range === '1h' || raw.range === '2h' ? raw.range : 'total'
   return { resolution, groupBy, range,
     ...(range === 'custom' ? { hours } : {}), ...(range === 'window' ? { start, end } : {}),
+    ...(range === 'window' && (raw.fixedWindow === true || raw.fixedWindow === 'true') ? { fixedWindow: true } : {}),
     ...(typeof raw.group === 'string' && raw.group.length <= 1024 && raw.group ? { group: raw.group } : {}) }
 }
 
@@ -130,18 +133,21 @@ export function buildCostHistory(source: Iterable<CostRecord>, maxPoints = 240, 
     totalCostUSD: unpricedResponses ? null : total, unpricedResponses, groups,
     groupBy: options.groupBy, group: options.group, resolution: options.resolution, range: options.range }
   const include = (record: CostRecord) => !options.group || groupId(record, options.groupBy!) === options.group
-  if (!Number.isFinite(first)) { history.cacheReuse = buildCacheReuse(records, undefined, include); return history }
-  history.bounds = { start: first, end: latest }
+  if (!Number.isFinite(first) && !options.fixedWindow) { history.cacheReuse = buildCacheReuse(records, undefined, include); return history }
+  if (Number.isFinite(first)) history.bounds = { start: first, end: latest }
   const duration = options.range === '1h' ? 3600000 : options.range === '2h' ? 7200000 : options.range === 'custom' ? options.hours! * 3600000 : undefined
-  const { start, end } = options.range === 'window' ? clampCostWindow({ start: options.start!, end: options.end! }, history.bounds)
+  const { start, end } = options.range === 'window' ? options.fixedWindow ? { start: options.start!, end: options.end! }
+    : clampCostWindow({ start: options.start!, end: options.end! }, history.bounds!)
     : { start: duration === undefined ? first : Math.max(0, latest - duration), end: latest }
-  history.cacheReuse = buildCacheReuse(records, { start, end }, include)
+  // Fixed windows power the daily rate comparison. Avoid sending the large
+  // per-agent detail lists twice more on a mobile connection.
+  if (!options.fixedWindow) history.cacheReuse = buildCacheReuse(records, { start, end }, include)
   let bucketMs = options.resolution === 'day' ? 86400000 : options.resolution === 'hour' ? 3600000 : 60000
   const minimumWidth = Math.max(1, (end - start) / (limit - 1) / bucketMs)
   const magnitude = 10 ** Math.floor(Math.log10(minimumWidth))
   bucketMs *= [1, 2, 5, 10].map(n => n * magnitude).find(n => n >= minimumWidth)!
-  const bucketStart = Math.floor(start / bucketMs) * bucketMs
-  const count = Math.floor((end - bucketStart) / bucketMs) + 1
+  const bucketStart = options.fixedWindow ? start : Math.floor(start / bucketMs) * bucketMs
+  const count = options.fixedWindow ? Math.max(1, Math.ceil((end - bucketStart) / bucketMs)) : Math.floor((end - bucketStart) / bucketMs) + 1
   const rate = history.burnRate = { bucketMs, endTimestamp: end, points: Array.from({ length: count }, (_, index) => ({
     timestamp: bucketStart + index * bucketMs, costUSDPerMinute: 0, breakdownUSDPerMinute: emptyBreakdown(),
   })) }
@@ -150,7 +156,7 @@ export function buildCostHistory(source: Iterable<CostRecord>, maxPoints = 240, 
   const ordered = [...charges].sort(([a], [b]) => a - b)
   for (const [timestamp, entry] of ordered) {
     if (timestamp < start) { baseline += entry.costUSD; add(baselineParts, entry.breakdownUSD) }
-    else if (timestamp <= end) {
+    else if (options.fixedWindow ? timestamp < end : timestamp <= end) {
       const bucket = rate.points[Math.floor((timestamp - bucketStart) / bucketMs)]
       bucket.costUSDPerMinute += entry.costUSD * 60000 / bucketMs
       add(bucket.breakdownUSDPerMinute, entry.breakdownUSD, 60000 / bucketMs)
@@ -159,7 +165,7 @@ export function buildCostHistory(source: Iterable<CostRecord>, maxPoints = 240, 
   history.window = { start, end, startCostUSD: baseline, startBreakdownUSD: { ...baselineParts } }
   let cumulative = baseline
   const cumulativeParts = { ...baselineParts }
-  const all = ordered.filter(([timestamp]) => timestamp >= start && timestamp <= end).map(([timestamp, entry]) => {
+  const all = ordered.filter(([timestamp]) => timestamp >= start && (options.fixedWindow ? timestamp < end : timestamp <= end)).map(([timestamp, entry]) => {
     add(cumulativeParts, entry.breakdownUSD)
     return { timestamp, costUSD: cumulative += entry.costUSD, breakdownUSD: { ...cumulativeParts } }
   })

@@ -10,8 +10,10 @@ import type { CostTimeWindow } from '../../../extension/src/cost-window'
 import type { CostBreakdown, CostHistoryPoint, CostHistoryOptions } from '../../../extension/src/token-usage'
 import { CostAnalyticsControls, costDollar as dollar, costRateUnit } from './cost-analytics-controls'
 import { CacheReusePanel } from './cache-reuse-panel'
+import { DailyBurnComparison } from './daily-burn-comparison'
+import type { BurnSource } from '@/hooks/burn-comparison'
 
-const LEFT = 42, RIGHT = 292, TOP = 12, BOTTOM = 96
+const LEFT = 42, RIGHT = 292, TOP = 12
 const SOURCES = [
   { key: 'input', label: 'Input', color: '#60a5fa' },
   { key: 'output', label: 'Output', color: '#fb923c' },
@@ -24,20 +26,27 @@ const date = (value: number) => new Date(value).toLocaleString(undefined, { mont
 const parts = (point: CostHistoryPoint): CostBreakdown => point.breakdownUSD ?? { ...ZERO, unattributed: point.costUSD }
 const bucketLabel = (ms: number) => ms % 86400000 === 0 ? `${ms / 86400000} day` : ms % 3600000 === 0 ? `${ms / 3600000} hr` : `${ms / 60000} min`
 
-function HistoryPlot({ series: data, label, start, end, loaded, bounds, selectedTime, overlay, bucketMs, rateSuffix = 'min', onSelect, onPreview, onCommit }: {
+function HistoryPlot({ series: data, label, start, end, loaded, bounds, selectedTime, overlay, bucketMs, rateSuffix = 'min', burnSource = 'all', rateStyle = 'lines', onSelect, onPreview, onCommit }: {
   series: CostHistoryPoint[]; label: string; start: number; end: number; selectedTime: number;
   overlay: boolean; bucketMs?: number; rateSuffix?: string; onSelect: (timestamp: number) => void;
   loaded: CostTimeWindow; bounds: CostTimeWindow; onPreview: (view: CostTimeWindow | null) => void; onCommit: (view: CostTimeWindow) => void;
+  burnSource?: 'all' | BurnSource; rateStyle?: 'lines' | 'bars';
 }) {
+  const BOTTOM = bucketMs ? 186 : 96
   const gestures = useCostChartGestures({ view: { start, end }, bounds, onPreview, onCommit, onSelect })
   // Only draw loaded data during a gesture; the new interval is fetched on release.
-  const series = costPlotSeries(data, { start, end }, loaded, bucketMs)
+  const clipped = costPlotSeries(data, { start, end }, loaded, bucketMs)
+  const source = burnSource !== 'all' && burnSource !== 'total' ? burnSource : null
+  const series = bucketMs && source ? clipped.map(point => ({ ...point, costUSD: parts(point)[source] })) : clipped
+  const sourceColor = SOURCES.find(item => item.key === source)?.color ?? '#fde68a'
+  const showRateSources = overlay && burnSource === 'all'
   const x = (time: number) => LEFT + (Math.max(start, Math.min(end, time)) - start) / Math.max(1, end - start) * (RIGHT - LEFT)
   const max = Math.max(...series.map(point => point.costUSD), 0) || 1
   const y = (cost: number) => BOTTOM - cost / max * (BOTTOM - TOP)
   const selected = series.findLast(point => point.timestamp <= selectedTime) ?? series[0]
   const path = (value: (point: CostHistoryPoint) => number) => series.map((point, index) =>
-    `${index ? 'H' : 'M'}${x(point.timestamp)}${index ? 'V' : ','}${y(value(point))}`).join(' ')
+    bucketMs && rateStyle === 'lines' ? `${index ? 'L' : 'M'}${x(point.timestamp)},${y(value(point))}`
+      : `${index ? 'H' : 'M'}${x(point.timestamp)}${index ? 'V' : ','}${y(value(point))}`).join(' ')
   const stack = (point: CostHistoryPoint, count: number) => SOURCES.slice(0, count).reduce((sum, source) => sum + parts(point)[source.key], 0)
   const area = (index: number) => path(point => stack(point, index + 1))
     + ` L${x(series.at(-1)!.timestamp)},${y(stack(series.at(-1)!, index))}`
@@ -47,17 +56,22 @@ function HistoryPlot({ series: data, label, start, end, loaded, bounds, selected
   const axis = max >= 1000000 ? `$${(max / 1000000).toFixed(1)}m` : max >= 1000 ? `$${(max / 1000).toFixed(1)}k` : dollar(max)
 
   return <svg role="img" aria-label={label} tabIndex={0} data-window-start={start} data-window-end={end}
-    viewBox="0 0 300 130" className="mt-1 block w-full rounded focus-visible:outline focus-visible:outline-cyan-300" style={{ touchAction: 'pan-y' }} {...gestures}>
+    viewBox={`0 0 300 ${BOTTOM + 34}`} className="mt-1 block w-full rounded focus-visible:outline focus-visible:outline-cyan-300" style={{ touchAction: 'pan-y' }} {...gestures}>
     <title>{label}</title>
     <desc>{date(start)} to {date(end)}. {bucketMs ? `Dollars per ${rateSuffix === 'hr' ? 'hour' : rateSuffix === 'min' ? 'minute' : 'day'}, averaged in ${bucketLabel(bucketMs)} buckets.` : 'Cumulative API cost.'} Tap to inspect, pinch to zoom, drag sideways to pan. Keyboard: plus or minus to zoom, left or right to pan. Total resets the view.</desc>
     {[TOP, (TOP + BOTTOM) / 2, BOTTOM].map(grid => <line key={grid} x1={LEFT} y1={grid} x2={RIGHT} y2={grid} stroke="#334155" />)}
     <text x="2" y={TOP + 4} fill="#cbd5e1" fontSize="9">{axis}</text>
     <text x="2" y={BOTTOM + 4} fill="#cbd5e1" fontSize="10">$0</text>
-    {!!series.length && (bucketMs ? <g aria-label={overlay ? 'Burn rate source overlay' : undefined}>
+    {bucketMs && <text x="2" y={(TOP + BOTTOM) / 2 + 4} fill="#cbd5e1" fontSize="9">{dollar(max / 2)}</text>}
+    {!!series.length && (bucketMs && rateStyle === 'lines' ? <g aria-label={showRateSources ? 'Burn rate source overlay' : undefined}>
+      {showRateSources ? SOURCES.filter(item => item.key !== 'unattributed' || series.some(point => parts(point).unattributed > 0)).map(item =>
+        <path key={item.key} data-source={item.key} d={path(point => parts(point)[item.key])} fill="none" stroke={item.color} strokeWidth="1.8" />)
+        : <path data-source={source ?? 'total'} d={path(point => point.costUSD)} fill="none" stroke={sourceColor} strokeWidth="2.2" />}
+    </g> : bucketMs ? <g aria-label={showRateSources ? 'Burn rate source overlay' : undefined}>
       {series.filter(point => point.timestamp < Math.min(end, loaded.end)).map(point => {
         const left = x(point.timestamp), width = x(Math.min(end, point.bucketEnd!)) - left
         let base = 0
-        return overlay ? SOURCES.map(source => {
+        return showRateSources ? SOURCES.map(source => {
           const value = parts(point)[source.key], bottom = base
           base += value
           return <rect key={`${point.timestamp}-${source.key}`} x={left} y={y(base)} width={Math.max(0, width - Math.min(1, width * 0.05))}
@@ -68,11 +82,11 @@ function HistoryPlot({ series: data, label, start, end, loaded, bounds, selected
     </g> : overlay ? <g aria-label="Cost source overlay">
       {SOURCES.map((source, index) => <path key={source.key} d={area(index)} fill={source.color} fillOpacity="0.5" />)}
     </g> : <path d={`${path(point => point.costUSD)} L${x(series.at(-1)!.timestamp)},${BOTTOM} L${x(series[0].timestamp)},${BOTTOM} Z`} fill="#22c55e" fillOpacity="0.12" />)}
-    <path d={path(point => point.costUSD)} fill="none" stroke={bucketMs ? '#fde68a' : '#86efac'} strokeWidth="2" strokeLinejoin="round" />
+    {(!bucketMs || rateStyle === 'bars' || showRateSources) && <path d={path(point => point.costUSD)} fill="none" stroke={bucketMs ? sourceColor : '#86efac'} strokeWidth="2" strokeLinejoin="round" />}
     <line x1={x(selectedTime)} x2={x(selectedTime)} y1={TOP} y2={BOTTOM} stroke="#67e8f9" strokeDasharray="3 3" />
     {selected && <circle cx={x(selectedTime)} cy={y(selected.costUSD)} r="3" fill="#67e8f9" />}
-    <text x={LEFT} y="121" fill="#cbd5e1" fontSize="10">{shortDate(start)}</text>
-    <text x={RIGHT} y="121" textAnchor="end" fill="#cbd5e1" fontSize="10">{shortDate(end)}</text>
+    <text x={LEFT} y={BOTTOM + 25} fill="#cbd5e1" fontSize="10">{shortDate(start)}</text>
+    <text x={RIGHT} y={BOTTOM + 25} textAnchor="end" fill="#cbd5e1" fontSize="10">{shortDate(end)}</text>
   </svg>
 }
 
@@ -82,6 +96,8 @@ export function CostHistoryChart({ sessionId }: { sessionId: string | null }) {
   const [selectedTime, setSelectedTime] = useState<number | null>(null)
   const [overlay, setOverlay] = useState(true)
   const [preview, setPreview] = useState<CostTimeWindow | null>(null)
+  const [burnSource, setBurnSource] = useState<'all' | BurnSource>('all')
+  const [burnView, setBurnView] = useState<'lines' | 'bars' | 'daily'>('lines')
   const points = history?.points ?? []
   const first = points[0], last = points.at(-1)
   const rate = history?.burnRate
@@ -132,7 +148,7 @@ export function CostHistoryChart({ sessionId }: { sessionId: string | null }) {
   }
   const group = history?.groups?.find(group => group.id === options.group)
   const codexZeroWrites = history?.groups?.some(group => (!options.group || group.id === options.group)
-    && /^gpt-(6|5\.6)/.test(group.model ?? '') && group.tokens.cacheReadTokens > 0 && group.tokens.cacheWriteTokens === 0)
+    && /^gpt-(6|5\.6)/.test(group.model ?? '') && group.tokens.cacheWriteTokens === 0)
 
   return <section aria-label="Cost history" aria-busy={loading} className="mt-4 border-t pt-3" style={{ borderColor: '#475569' }}>
     <div className="flex items-center justify-between gap-2">
@@ -169,9 +185,27 @@ export function CostHistoryChart({ sessionId }: { sessionId: string | null }) {
         onSelect={inspectCost} onPreview={setPreview} onCommit={changeWindow} />
       {!!rates.length && <>
         <h4 className="mt-2 font-semibold text-slate-100">Dollar burn rate</h4>
-        <p className="text-[11px] text-slate-300">$/{unit.suffix} · {bucketLabel(rate!.bucketMs)} buckets</p>
-        <HistoryPlot series={plotRates} label="API dollar burn rate" start={start} end={end} loaded={loaded} bounds={bounds} selectedTime={time} overlay={overlay}
-          bucketMs={rate!.bucketMs} rateSuffix={unit.suffix} onSelect={inspectRate} onPreview={setPreview} onCommit={changeWindow} />
+        <p className="text-[11px] text-slate-300">Gradient of cumulative cost · Δcost / Δtime</p>
+        <div className="mt-2 grid grid-cols-2 gap-2">
+          <label className="min-w-0 text-[11px] text-slate-300"><span className="mb-1 block">Source</span>
+            <select aria-label="Burn rate source" value={burnSource} onChange={event => setBurnSource(event.target.value as typeof burnSource)} className="min-h-11 w-full min-w-0 rounded border border-slate-500 bg-slate-900 px-1 text-slate-100">
+              <option value="all">All sources</option><option value="total">Total</option>{SOURCES.map(source => <option key={source.key} value={source.key}>{source.label}</option>)}
+            </select>
+          </label>
+          <label className="min-w-0 text-[11px] text-slate-300"><span className="mb-1 block">View</span>
+            <select aria-label="Burn rate view" value={burnView} onChange={event => setBurnView(event.target.value as typeof burnView)} className="min-h-11 w-full min-w-0 rounded border border-slate-500 bg-slate-900 px-1 text-slate-100">
+              <option value="lines">Rate lines</option><option value="bars">Stacked bars</option><option value="daily">Today / yesterday</option>
+            </select>
+          </label>
+        </div>
+        {burnView === 'daily' ? <DailyBurnComparison sessionId={sessionId} options={options} source={burnSource === 'all' ? 'total' : burnSource}
+          sourceLabel={SOURCES.find(source => source.key === burnSource)?.label ?? 'Total'} color={SOURCES.find(source => source.key === burnSource)?.color ?? '#fde68a'} cacheWritesUnknown={!!codexZeroWrites} />
+          : <>
+            <p className="mt-2 text-[11px] text-slate-300">$/{unit.suffix} · {bucketLabel(rate!.bucketMs)} buckets{burnView === 'lines' ? ' · each source starts at zero' : ''}</p>
+            {burnSource === 'cacheWrite' && codexZeroWrites && parts(last).cacheWrite === 0 ? <p className="mt-2 text-[11px] text-amber-200">Cache-write burn is unknown for these Codex logs.</p>
+              : <HistoryPlot series={plotRates} label="API dollar burn rate" start={start} end={end} loaded={loaded} bounds={bounds} selectedTime={time} overlay={overlay}
+                bucketMs={rate!.bucketMs} rateSuffix={unit.suffix} burnSource={burnSource} rateStyle={burnView} onSelect={inspectRate} onPreview={setPreview} onCommit={changeWindow} />}
+          </>}
       </>}
       <input type="range" aria-label="Inspect cost history" min={0} max={points.length - 1} step={1} value={selectedIndex}
         disabled={points.length < 2} onChange={event => selectPoint(Number(event.target.value))}
@@ -180,7 +214,7 @@ export function CostHistoryChart({ sessionId }: { sessionId: string | null }) {
       <p className="text-[11px] text-slate-300">{date(time)}</p>
       <div className="mt-1 flex flex-wrap justify-between gap-x-3 gap-y-1 text-[11px] tabular-nums">
         <output aria-label="Cost at selected time" className="text-green-200">{dollar(selected?.costUSD ?? 0)}</output>
-        {selectedRate && <output aria-label="Burn rate at selected time" className="text-amber-200">{dollar(selectedRate.costUSDPerMinute * unit.factor)}/{unit.suffix}</output>}
+        {selectedRate && burnView !== 'daily' && <output aria-label="Burn rate at selected time" className="text-amber-200">{burnSource === 'cacheWrite' && codexZeroWrites ? 'Unknown' : `${dollar(burnSource === 'all' || burnSource === 'total' ? selectedRate.costUSDPerMinute * unit.factor : rateParts[burnSource])}/${unit.suffix}`}</output>}
       </div>
       {selectedRate && <p className="mt-1 text-[10px] text-slate-400">Bucket from {date(selectedRate.timestamp)}. Rates use full bucket durations; the latest bucket may still be filling.</p>}
       {overlay && <table aria-label="Cost and burn rate by source" className="mt-3 w-full table-auto text-[11px]">
