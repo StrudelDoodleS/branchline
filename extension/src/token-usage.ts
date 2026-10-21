@@ -15,7 +15,7 @@ export interface UsageTotals extends TokenCounts {
 }
 
 export * from './cost-history'
-import type { CostRecord, CostBreakdown, CostGroup } from './cost-history'
+import type { CostRecord, CostBreakdown } from './cost-history'
 
 export interface ReasoningSettings { effort?: string | null; perTurnEffort?: string | null }
 interface UsageCall extends TokenCounts { model?: string; kind?: string; reasoningEffort?: string | null }
@@ -64,35 +64,6 @@ const PRICES: Record<string, Rates> = {
   'claude-sonnet-4-6': { input: 3, output: 15, read: 0.3, write: 3.75, write1h: 6 },
   'claude-sonnet-4-5': { input: 3, output: 15, read: 0.3, write: 3.75, write1h: 6.0, longAfter: 200000, longInput: 2, longOutput: 1.5 },
   'claude-haiku-4-5': { input: 1, output: 5, read: 0.1, write: 1.25, write1h: 2 },
-}
-
-export interface CacheWriteEstimate {
-  tokens: number
-  costUSD: number
-  alreadyCountedInputUSD: number
-  additionalCostUSD: number
-}
-
-/** Scenario, not recovered telemetry: all uncached prompt tokens become 30m
- * writes. Reprice their existing input cost so long-context weighting survives
- * and the caller can show the incremental cost without counting input twice. */
-export function estimateCodexCacheWrites(groups: ReadonlyArray<CostGroup>, selected?: string): CacheWriteEstimate | undefined {
-  const result = { tokens: 0, costUSD: 0, alreadyCountedInputUSD: 0, additionalCostUSD: 0 }
-  for (const group of groups) {
-    if (selected && group.id !== selected || !/^gpt-(6|5\.6)/i.test(group.model ?? '')) continue
-    const rates = PRICES[(group.model ?? '').toLowerCase().replace(/\[[^\]]*\]/g, '').replace(/-\d{8}$/, '')]
-    const inputCost = group.breakdownUSD.input
-    if (!rates || !Number.isFinite(rates.write) || group.costUSD === null || !valid(group.tokens)
-      || group.tokens.cacheWriteTokens !== 0 || group.tokens.cacheReadTokens <= 0 || group.tokens.inputTokens <= 0
-      || !Number.isFinite(inputCost) || inputCost <= 0) continue
-    const cost = inputCost * (rates.write / rates.input)
-    if (!Number.isFinite(cost)) continue
-    result.tokens += group.tokens.inputTokens
-    result.costUSD += cost
-    result.alreadyCountedInputUSD += inputCost
-  }
-  result.additionalCostUSD = result.costUSD - result.alreadyCountedInputUSD
-  return result.tokens > 0 ? result : undefined
 }
 
 const KEYS = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'cacheWrite1hTokens', 'reasoningTokens'] as const
