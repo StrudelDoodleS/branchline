@@ -1,14 +1,18 @@
 // Branchline fork modifications; see FORK.md.
 import { defineConfig } from 'vite'
+import { resolve } from 'path'
 import { createBuildConfig } from './vite.config.shared'
 
-export default defineConfig(createBuildConfig({
-  outDir: '../app/dist/webview',
-  entry: 'app-entry.tsx',
-  name: 'BranchlineApp',
-  define: {
-    'process.env.NEXT_PUBLIC_DEMO': '"0"',
-    'process.env.NEXT_PUBLIC_RELAY_PORT': '""',
-    'process.env.AGENT_FLOW_STANDALONE': '"1"',
-  },
-}))
+export default defineConfig({
+  ...createBuildConfig({
+    outDir: '../app/dist/webview',
+    entry: 'app-entry.tsx',
+    name: 'BranchlineApp',
+    define: {
+      'process.env.NEXT_PUBLIC_DEMO': '"0"',
+      'process.env.NEXT_PUBLIC_RELAY_PORT': '""',
+      'process.env.AGENT_FLOW_STANDALONE': '"1"',
+    },
+  }),
+  publicDir: resolve(__dirname, 'public'),
+})

@@ -94,3 +94,38 @@ test('invalidates compressed assets and validators when a build replaces or remo
   await fs.unlink(file)
   assert.equal((await f.get('/index.js')).status, 404)
 })
+
+test('page declares browser and phone icons on bookmarked URLs with query parameters', async t => {
+  const f = await fixture(t)
+  for (const url of ['/', '/index.html', '/?from=bookmark']) {
+    const response = await f.get(url)
+    assert.equal(response.status, 200)
+    const html = response.body.toString()
+    assert.match(html, /rel="icon"[^>]*href="\/icon\.svg\?v=1"/)
+    assert.match(html, /rel="icon"[^>]*sizes="32x32"[^>]*href="\/icon-32\.png\?v=1"/)
+    assert.match(html, /rel="apple-touch-icon"[^>]*sizes="180x180"[^>]*href="\/apple-touch-icon\.png\?v=1"/)
+    assert.match(html, /rel="manifest"[^>]*href="\/site\.webmanifest\?v=1"/)
+  }
+})
+
+test('serves icon formats and manifest with correct media types and query-safe cache validation', async t => {
+  const f = await fixture(t)
+  const files = [
+    ['icon.svg', Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path d="M20 15v34h24"/></svg>'), 'image/svg+xml'],
+    ['icon-32.png', Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==', 'base64'), 'image/png'],
+    ['favicon.ico', Buffer.from([0, 0, 1, 0, 0, 0, 128, 255]), 'image/x-icon'],
+    ['site.webmanifest', Buffer.from('{"name":"Branchline","icons":[]}'), 'application/manifest+json'],
+  ] as const
+  for (const [name, content, mime] of files) {
+    await fs.writeFile(path.join(f.directory, name), content)
+    const response = await f.get(`/${name}?v=1`, { 'Accept-Encoding': 'gzip' })
+    assert.equal(response.status, 200, name)
+    assert.equal(response.headers['content-type'], mime)
+    const body = response.headers['content-encoding'] === 'gzip' ? gunzipSync(response.body) : response.body
+    assert.deepEqual(body, content)
+    if (mime === 'image/png' || mime === 'image/x-icon') assert.equal(response.headers['content-encoding'], undefined)
+    const unchanged = await f.get(`/${name}?v=1`, { 'Accept-Encoding': 'gzip', 'If-None-Match': response.headers.etag })
+    assert.equal(unchanged.status, 304)
+    assert.equal(unchanged.body.length, 0)
+  }
+})

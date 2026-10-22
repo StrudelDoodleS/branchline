@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<!-- Branchline fork artwork previews; see FORK.md. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#020617">
+  <title>Branchline · icon options</title>
+  <link id="tab-icon" rel="icon" type="image/svg+xml" href="/icon-fork.svg">
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #020617; color: #f1f5f9; font: 15px/1.5 system-ui, sans-serif; }
+    main { width: min(100%, 480px); margin: auto; padding: 24px 20px; }
+    h1 { font-size: 27px; line-height: 1.2; margin: 0 0 7px; letter-spacing: -.6px; }
+    p { margin: 0; color: #cbd5e1; }
+    header { margin-bottom: 24px; }
+    article { border: 1px solid #334155; border-radius: 20px; padding: 18px; margin-top: 14px; background: #0b1223; }
+    article[data-selected] { border-color: #22d3ee; }
+    .hero { display: flex; align-items: center; gap: 18px; }
+    .hero > img { flex: none; width: 80px; height: 80px; }
+    h2 { font-size: 20px; line-height: 1.3; margin: 0 0 4px; }
+    .badge { color: #a5f3fc; font-size: 12px; margin: 0 0 5px; font-weight: 600; }
+    .description { font-size: 13px; }
+    .examples { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 18px; }
+    .tab { display: flex; gap: 8px; align-items: center; border-radius: 9px; padding: 9px 12px; height: 42px; font-size: 12px; }
+    .dark { background: #1e293b; color: #f1f5f9; }
+    .light { background: #f1f5f9; color: #0f172a; }
+    .sizes { display: flex; align-items: center; gap: 10px; margin-left: auto; color: #cbd5e1; font-size: 11px; }
+    .home { border-radius: 50%; width: 36px; height: 36px; background: #0f172a; display: grid; place-items: center; overflow: hidden; }
+    .home img { width: 30px; height: 30px; }
+    button { margin-top: 15px; min-height: 44px; width: 100%; border: 1px solid #475569; border-radius: 10px; background: #182338; color: #f1f5f9; font: inherit; font-size: 13px; cursor: pointer; }
+    button:focus-visible { outline: 2px solid #67e8f9; outline-offset: 3px; }
+    button[aria-pressed="true"] { border-color: #22d3ee; color: #a5f3fc; }
+    footer { margin: 20px 0 4px; font-size: 12px; color: #94a3b8; }
+    a { color: #a5f3fc; }
+    @media (prefers-reduced-motion: no-preference) { button { transition: background-color .12s; } }
+  </style>
+</head>
+<body>
+<main>
+  <header><h1>Branchline icons</h1><p>Three directions. Shown at real tab size.</p></header>
+  <article>
+    <div class="hero"><img src="/icon-tree.svg" alt="A: cyan file tree with three nodes"><div><p class="badge">A · ORIGINAL MARK</p><h2>Branch</h2><p class="description">A main session and its branches.<br>Simple, clear at 16 pixels.</p></div></div>
+    <div class="examples"><div class="tab dark"><img src="/icon-tree.svg" width="16" height="16" alt="">Branchline</div><div class="tab light"><img src="/icon-tree.svg" width="16" height="16" alt="">Branchline</div><div class="sizes"><img src="/icon-tree.svg" width="32" height="32" alt="32 pixel icon"><span class="home"><img src="/icon-tree.svg" alt="Circular phone icon"></span></div></div>
+    <button data-icon="icon-tree.svg" aria-pressed="false">Preview A in this tab</button>
+  </article>
+  <article data-selected>
+    <div class="hero"><img src="/icon-fork.svg" alt="B: cyan and violet paths splitting into a fork"><div><p class="badge">B · SELECTED</p><h2>Fork</h2><p class="description">One session splitting into workers.<br>A stronger branching silhouette.</p></div></div>
+    <div class="examples"><div class="tab dark"><img src="/icon-fork.svg" width="16" height="16" alt="">Branchline</div><div class="tab light"><img src="/icon-fork.svg" width="16" height="16" alt="">Branchline</div><div class="sizes"><img src="/icon-fork.svg" width="32" height="32" alt="32 pixel icon"><span class="home"><img src="/icon-fork.svg" alt="Circular phone icon"></span></div></div>
+    <button data-icon="icon-fork.svg" aria-pressed="true">Preview B in this tab</button>
+  </article>
+  <article>
+    <div class="hero"><img src="/icon-monogram.svg" alt="C: letter B drawn as connected cyan paths with a violet node"><div><p class="badge">C · LETTER MARK</p><h2>Node B</h2><p class="description">Branchline’s initial, drawn as paths.<br>More of a recognisable app badge.</p></div></div>
+    <div class="examples"><div class="tab dark"><img src="/icon-monogram.svg" width="16" height="16" alt="">Branchline</div><div class="tab light"><img src="/icon-monogram.svg" width="16" height="16" alt="">Branchline</div><div class="sizes"><img src="/icon-monogram.svg" width="32" height="32" alt="32 pixel icon"><span class="home"><img src="/icon-monogram.svg" alt="Circular phone icon"></span></div></div>
+    <button data-icon="icon-monogram.svg" aria-pressed="false">Preview C in this tab</button>
+  </article>
+  <footer>Buttons preview this tab’s icon. The dashboard uses B, the fork.<br><a href="/">Back to Branchline</a></footer>
+</main>
+<script>
+  document.querySelectorAll('button[data-icon]').forEach(button => button.addEventListener('click', () => {
+    document.querySelector('#tab-icon').href = '/' + button.dataset.icon;
+    document.querySelectorAll('button[data-icon]').forEach(choice => choice.setAttribute('aria-pressed', String(choice === button)));
+  }));
+</script>
+</body>
+</html>

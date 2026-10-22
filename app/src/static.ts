@@ -16,7 +16,14 @@ const HTML_SHELL = `<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#0a0a1a">
+  <meta name="apple-mobile-web-app-title" content="Branchline">
   <title>Branchline</title>
+  <link rel="shortcut icon" href="/favicon.ico?v=1">
+  <link rel="icon" type="image/png" sizes="32x32" href="/icon-32.png?v=1">
+  <link rel="icon" type="image/svg+xml" sizes="any" href="/icon.svg?v=1">
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=1">
+  <link rel="manifest" href="/site.webmanifest?v=1">
   <link rel="stylesheet" href="/index.css">
   <style>html, body { height: 100%; margin: 0; padding: 0; }</style>
 </head>
@@ -30,6 +37,10 @@ const MIME_TYPES: Record<string, string> = {
   '.js': 'application/javascript',
   '.css': 'text/css',
   '.html': 'text/html',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.ico': 'image/x-icon',
+  '.webmanifest': 'application/manifest+json',
 }
 
 interface Representation { content: Buffer; etag: string }
@@ -49,7 +60,7 @@ function acceptsGzip(header = ''): boolean {
 }
 
 function sendAsset(req: http.IncomingMessage, res: http.ServerResponse, asset: CachedAsset, mime: string): void {
-  const zipped = acceptsGzip(req.headers['accept-encoding'])
+  const zipped = acceptsGzip(req.headers['accept-encoding']) && mime !== 'image/png' && mime !== 'image/x-icon'
   // Compress once per asset generation, keeping repeated loads off the CPU.
   const selected = zipped ? asset.gzip ??= representation(gzipSync(asset.identity.content)) : asset.identity
   const headers: http.OutgoingHttpHeaders = { 'Content-Type': mime, 'Cache-Control': 'no-cache',
@@ -65,7 +76,7 @@ function sendAsset(req: http.IncomingMessage, res: http.ServerResponse, asset: C
 }
 
 export function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, webviewDir = WEBVIEW_DIR) {
-  const url = req.url || '/'
+  const url = (req.url || '/').split('?')[0]
 
   if (url === '/' || url === '/index.html') {
     sendAsset(req, res, html, 'text/html')

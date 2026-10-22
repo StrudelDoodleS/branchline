@@ -33,6 +33,7 @@ Branchline is maintained by StrudelDoodleS and derives from Agent Flow by Simon 
 - Lower phone rendering load: covered graphs stop drawing, hidden pages pause animation and analytics polling, and the tree uses coarse ticks with correct elapsed time. Touch graphs use lighter bloom and 30 resting frames per second, with faster input rendering. Cached chart work and unchanged responses reduce redraws; compressed, validated static assets reduce downloads, and repeated cost aggregation reuses timezone labels.
 - Root, extension, and browser regression coverage for these behaviors.
 - Separate Branchline package identities and branding; telemetry defaults off with no collector configured.
+- Browser favicons, Apple touch icons, Android shortcut icons with safe mask padding, and a phone-sized icon comparison page at `/icon-options.html`.
 
 Modified source files carry a Branchline fork notice. Git history records their full diffs.
 

@@ -1,0 +1,7 @@
+<!-- Branchline icon concept C. Fork artwork; see FORK.md. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <rect width="64" height="64" rx="12" fill="#0f172a"/>
+  <path d="M19 50V14h14c8 0 13 4 13 10s-4 9-12 9H19m15 0c9 0 14 3 14 9s-5 9-14 9H19" stroke="#67e8f9" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="19" cy="14" r="5" fill="#a5f3fc"/>
+  <circle cx="46" cy="24" r="5" fill="#a78bfa"/>
+</svg>

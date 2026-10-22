@@ -1,0 +1,8 @@
+<!-- Branchline fork modifications; see FORK.md. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <rect width="64" height="64" rx="12" fill="#0f172a"/>
+  <path d="M20 15v34m0-23h24m-24 19h24" stroke="#67e8f9" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="20" cy="15" r="5" fill="#67e8f9"/>
+  <circle cx="44" cy="26" r="5" fill="#a5f3fc"/>
+  <circle cx="44" cy="45" r="5" fill="#a5f3fc"/>
+</svg>
