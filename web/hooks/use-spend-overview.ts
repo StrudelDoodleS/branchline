@@ -1,10 +1,12 @@
 // Branchline fork modifications; see FORK.md.
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { usePageVisible } from '@/hooks/use-page-visible'
 import type { SpendOverviewResponse, SpendOverviewStatus } from '../../extension/src/spend-overview'
 
 export function useSpendOverview(enabled: boolean, query: { start?: number; timezone: string; provider: string; model?: string }) {
+  const visible = usePageVisible()
   const parameters = new URLSearchParams(Object.entries(query).flatMap(([key, value]) => value === undefined ? [] : [[key, String(value)]]))
   const scope = new URLSearchParams(parameters); scope.delete('end')
   const scopeKey = scope.toString(), queryKey = parameters.toString()
@@ -16,7 +18,7 @@ export function useSpendOverview(enabled: boolean, query: { start?: number; time
   const forceNext = useRef(false)
 
   useEffect(() => {
-    if (!enabled) return
+    if (!enabled || !visible) return
     let active = true
     const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -52,14 +54,15 @@ export function useSpendOverview(enabled: boolean, query: { start?: number; time
     }
     void load(force).catch(failed)
     return () => { active = false; controller.abort(); clearTimeout(timer) }
-  }, [enabled, queryKey, scopeKey, revision])
+  }, [enabled, queryKey, scopeKey, revision, visible])
 
   const data = snapshot?.key === scopeKey ? snapshot.data : undefined
+  const refresh = useCallback(() => { forceNext.current = true; setRevision(value => value + 1) }, [])
   return {
     data,
     status: progress?.key === scopeKey ? progress.status : data?.status,
     error: failure?.key === scopeKey ? failure.error : undefined,
     loading,
-    refresh: () => { forceNext.current = true; setRevision(value => value + 1) },
+    refresh,
   }
 }

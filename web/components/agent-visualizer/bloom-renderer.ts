@@ -1,3 +1,4 @@
+// Branchline fork modifications; see FORK.md.
 /**
  * Bloom post-processing for holographic glow effect.
  * Takes the main canvas, extracts bright areas, blurs them,
@@ -13,7 +14,7 @@ export class BloomRenderer {
 
   private enabled: boolean
 
-  constructor(intensity: number = 0.6) {
+  constructor(intensity: number = 0.6, private readonly quality: 'full' | 'light' = 'full') {
     this.intensity = intensity
     this.bloomCanvas = document.createElement('canvas')
     this.tempCanvas = document.createElement('canvas')
@@ -26,7 +27,7 @@ export class BloomRenderer {
 
   resize(width: number, height: number): void {
     // Bloom at half resolution for performance
-    const scale = 0.5
+    const scale = this.quality === 'light' ? 0.25 : 0.5
     this.bloomCanvas.width = width * scale
     this.bloomCanvas.height = height * scale
     this.tempCanvas.width = width * scale
@@ -44,12 +45,11 @@ export class BloomRenderer {
     this.bloomCtx.drawImage(sourceCanvas, 0, 0, w, h)
 
     // Apply blur passes (box blur approximation of gaussian)
-    this.boxBlur(this.bloomCtx, this.tempCtx, w, h, 8)
-    this.boxBlur(this.bloomCtx, this.tempCtx, w, h, 6)
-    this.boxBlur(this.bloomCtx, this.tempCtx, w, h, 4)
+    for (const radius of this.quality === 'light' ? [4] : [8, 6, 4]) this.boxBlur(this.bloomCtx, this.tempCtx, w, h, radius)
 
     // Composite bloom over the target with additive blending
     targetCtx.save()
+    targetCtx.resetTransform()
     targetCtx.globalCompositeOperation = 'lighter'
     targetCtx.globalAlpha = this.intensity
     targetCtx.drawImage(this.bloomCanvas, 0, 0, sourceCanvas.width, sourceCanvas.height)

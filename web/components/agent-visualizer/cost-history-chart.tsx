@@ -1,7 +1,7 @@
 // Branchline fork modifications; see FORK.md.
 'use client'
 
-import { useState } from 'react'
+import { memo, useMemo, useState } from 'react'
 import { useCostHistory } from '@/hooks/use-cost-history'
 import { useCostChartGestures } from '@/hooks/use-cost-chart-gestures'
 import { costPlotSeries } from '@/hooks/cost-plot-series'
@@ -93,7 +93,7 @@ function HistoryPlot({ series: data, label, start, end, loaded, bounds, selected
   </svg>
 }
 
-export function CostHistoryChart({ sessionId, initialComparisonDay, initialView = 'compare' }: { sessionId: string | null; initialComparisonDay?: string; initialView?: 'spend' | 'burn' | 'compare' }) {
+export const CostHistoryChart = memo(function CostHistoryChart({ sessionId, initialComparisonDay, initialView = 'compare' }: { sessionId: string | null; initialComparisonDay?: string; initialView?: 'spend' | 'burn' | 'compare' }) {
   const [options, setOptions] = useState<CostHistoryOptions>({ groupBy: 'model', resolution: 'auto', range: 'total' })
   const { history, error, retry, loading, isPreviousData } = useCostHistory(sessionId, options)
   const [selectedTime, setSelectedTime] = useState<number | null>(null)
@@ -124,7 +124,8 @@ export function CostHistoryChart({ sessionId, initialComparisonDay, initialView 
   const loaded = { start: loadedStart, end: loadedEnd }
   const time = Math.max(start, Math.min(end, selectedTime ?? end))
   const selectedIndex = Math.max(0, points.findLastIndex(point => point.timestamp <= time))
-  const baseline = { timestamp: loadedStart, costUSD: window?.startCostUSD ?? 0, breakdownUSD: window?.startBreakdownUSD ?? ZERO }
+  const baseline = useMemo(() => ({ timestamp: loadedStart, costUSD: window?.startCostUSD ?? 0, breakdownUSD: window?.startBreakdownUSD ?? ZERO }),
+    [loadedStart, window?.startCostUSD, window?.startBreakdownUSD])
   const selected = points.findLast(point => point.timestamp <= time) ?? baseline
   const selectedRate = rates.find(point => point.timestamp <= time && time < point.timestamp + rate!.bucketMs)
   const selectPoint = (index: number) => setSelectedTime(index === points.length - 1 ? null : points[index].timestamp)
@@ -140,12 +141,15 @@ export function CostHistoryChart({ sessionId, initialComparisonDay, initialView 
   const scaleRate = (value: CostBreakdown): CostBreakdown => ({ input: value.input * unit.factor, output: value.output * unit.factor,
     cacheRead: value.cacheRead * unit.factor, cacheWrite: value.cacheWrite * unit.factor, unattributed: value.unattributed * unit.factor })
   const rateParts = scaleRate(selectedRate?.breakdownUSDPerMinute ?? ZERO)
-  const plotCosts: CostHistoryPoint[] = first && last ? [
+  const plotCosts: CostHistoryPoint[] = useMemo(() => first && last ? [
     baseline, ...points,
     { ...last, timestamp: loadedEnd },
-  ] : []
-  const plotRates: CostHistoryPoint[] = rates.map(point => ({ timestamp: point.timestamp, costUSD: point.costUSDPerMinute * unit.factor, breakdownUSD: scaleRate(point.breakdownUSDPerMinute) }))
-  if (plotRates.length) plotRates.push({ ...plotRates.at(-1)!, timestamp: loadedEnd })
+  ] : [], [history, baseline, loadedEnd])
+  const plotRates: CostHistoryPoint[] = useMemo(() => {
+    const series = rates.map(point => ({ timestamp: point.timestamp, costUSD: point.costUSDPerMinute * unit.factor, breakdownUSD: scaleRate(point.breakdownUSDPerMinute) }))
+    if (series.length) series.push({ ...series.at(-1)!, timestamp: loadedEnd })
+    return series
+  }, [rate, loadedEnd, unit.factor])
   const changeOptions = (next: CostHistoryOptions) => { setPreview(null); setSelectedTime(null); setOptions(normalizeCostHistoryOptions({ ...next })) }
   const changeWindow = (next: CostTimeWindow) => {
     const start = Math.round(next.start), end = Math.round(next.end)
@@ -273,4 +277,4 @@ export function CostHistoryChart({ sessionId, initialComparisonDay, initialView 
     {!!history?.untimedCostUSD && <p className="mt-3 text-xs text-slate-400">{dollar(history.untimedCostUSD)} has no recorded timestamp and is included in the total above, outside these graphs.</p>}
     {history?.cacheReuse && <details open={reuseDetails} onToggle={event => setReuseDetails(event.currentTarget.open)} className="mt-2 border-t border-slate-700 pt-1"><summary className="min-h-11 cursor-pointer content-center text-sm text-slate-300">Cache reuse by agent</summary><CacheReusePanel analytics={history.cacheReuse} /></details>}
   </section>
-}
+})

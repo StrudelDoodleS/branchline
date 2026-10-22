@@ -21,7 +21,9 @@ import { snapVisualState } from './simulation/snap-visual-state'
 import { shouldCommitFrame } from './simulation/ui-throttle'
 
 export function useAgentSimulation(options: UseAgentSimulationOptions = {}) {
-  const { useMockData = true, externalEvents, onExternalEventsConsumed, sessionFilter, sessionFilterRef: externalFilterRef, disable1MContext = false } = options
+  const { useMockData = true, externalEvents, onExternalEventsConsumed, sessionFilter, sessionFilterRef: externalFilterRef, disable1MContext = false, renderMode = 'graph', reducedFrameRate = false } = options
+  const modeRef = useRef(renderMode)
+  modeRef.current = renderMode
   const internalFilterRef = useRef(sessionFilter)
   internalFilterRef.current = sessionFilter
   const sessionFilterRef = externalFilterRef ?? internalFilterRef
@@ -41,6 +43,7 @@ export function useAgentSimulation(options: UseAgentSimulationOptions = {}) {
   }, [])
 
   const animationRef = useRef<number>(0)
+  const tickTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const lastTimeRef = useRef<number>(0)
   const forceSimRef = useRef<Simulation<ForceNode, ForceLink> | null>(null)
   const blockIdCounter = useRef(0)
@@ -49,6 +52,11 @@ export function useAgentSimulation(options: UseAgentSimulationOptions = {}) {
   /** Throttle React UI updates to ~4/sec — canvas stays smooth via frameRef */
   const lastUIUpdateRef = useRef(0)
   const lastUITimeRef = useRef(0)
+
+  const scheduleFrame = useCallback(() => {
+    if (modeRef.current === 'graph') animationRef.current = requestAnimationFrame(animateRef.current)
+    else if (modeRef.current === 'tree') tickTimerRef.current = setTimeout(() => animateRef.current(performance.now()), 250)
+  }, [])
 
   // ─── d3-force simulation ─────────────────────────────────────────────────
   useEffect(() => {
@@ -85,6 +93,7 @@ export function useAgentSimulation(options: UseAgentSimulationOptions = {}) {
 
   // ─── Force simulation sync ───────────────────────────────────────────────
   const syncForceSimulation = useCallback((agents: Map<string, Agent>, edges: Edge[]) => {
+    if (modeRef.current !== 'graph') return
     const sim = forceSimRef.current
     if (!sim) return
 
@@ -108,6 +117,10 @@ export function useAgentSimulation(options: UseAgentSimulationOptions = {}) {
     for (let i = 0; i < 15; i++) sim.tick()
     sim.stop()
   }, [])
+
+  useEffect(() => {
+    if (renderMode === 'graph') syncForceSimulation(frameRef.current.agents, frameRef.current.edges)
+  }, [renderMode, syncForceSimulation])
 
   // ─── Tool slot placement ─────────────────────────────────────────────────
   const findToolSlot = useCallback((
@@ -175,16 +188,22 @@ export function useAgentSimulation(options: UseAgentSimulationOptions = {}) {
   // Reads/writes frameRef directly. Only calls commitState when new events
   // are processed, so React only re-renders UI on structural data changes.
   const animate = useCallback((timestamp: number) => {
+    const mode = modeRef.current
+    if (mode === 'hidden') return
     // Cap at 60fps to reduce CPU/GPU load
     const elapsed = timestamp - lastTimeRef.current
-    if (lastTimeRef.current && elapsed < ANIM_SPEED.minFrameInterval) {
-      animationRef.current = requestAnimationFrame(animateRef.current)
+    if (mode === 'graph' && lastTimeRef.current && elapsed < (reducedFrameRate ? 1000 / 30 - 1 : ANIM_SPEED.minFrameInterval)) {
+      scheduleFrame()
       return
     }
 
     if (!lastTimeRef.current) lastTimeRef.current = timestamp
-    const deltaTime = Math.min((timestamp - lastTimeRef.current) / 1000, ANIM_SPEED.maxDeltaTime)
+    const elapsedSeconds = Math.max(0, (timestamp - lastTimeRef.current) / 1000)
+    const deltaTime = Math.min(elapsedSeconds, mode === 'graph' ? ANIM_SPEED.maxDeltaTime : 1)
     lastTimeRef.current = timestamp
+
+    const prev = frameRef.current
+    if (!prev.isPlaying) return
 
     // Snapshot and consume external events OUTSIDE the main processing
     // to avoid React strict mode double-invocation clearing them
@@ -194,13 +213,7 @@ export function useAgentSimulation(options: UseAgentSimulationOptions = {}) {
       onExternalEventsConsumed?.()
     }
 
-    const prev = frameRef.current
-    if (!prev.isPlaying) {
-      animationRef.current = requestAnimationFrame(animateRef.current)
-      return
-    }
-
-    let newTime = prev.currentTime + deltaTime * prev.speed
+    let newTime = prev.currentTime + (useMockData ? deltaTime : elapsedSeconds) * prev.speed
     let maxT = Math.max(prev.maxTimeReached, newTime)
     let newEventIndex = prev.eventIndex
 
@@ -279,10 +292,10 @@ export function useAgentSimulation(options: UseAgentSimulationOptions = {}) {
     frameRef.current = result
 
     // Force tick — updates agent positions in frameRef
-    if (forceSimRef.current) forceSimRef.current.tick()
+    if (mode === 'graph' && forceSimRef.current && forceSimRef.current.alpha() > forceSimRef.current.alphaMin()) forceSimRef.current.tick()
 
     // Throttle React re-renders — UI updates at most ~4/sec, canvas stays smooth via frameRef
-    if (shouldCommitFrame({
+    if (mode === 'covered' && newEvents.length > 0 || shouldCommitFrame({
       now: timestamp,
       lastCommitAt: lastUIUpdateRef.current,
       processedEvents: newEvents.length > 0,
@@ -294,22 +307,28 @@ export function useAgentSimulation(options: UseAgentSimulationOptions = {}) {
       lastUITimeRef.current = result.currentTime
     }
 
-    animationRef.current = requestAnimationFrame(animateRef.current)
+    scheduleFrame()
   // eslint-disable-next-line react-hooks/exhaustive-deps -- sessionFilter intentionally omitted; we read sessionFilterRef.current
-  }, [processEventWithContext, useMockData, externalEvents, onExternalEventsConsumed])
+  }, [processEventWithContext, useMockData, externalEvents, onExternalEventsConsumed, reducedFrameRate, scheduleFrame])
 
   animateRef.current = animate
 
   useEffect(() => {
-    const loop = (timestamp: number) => animateRef.current(timestamp)
     if (state.isPlaying) {
-      lastTimeRef.current = 0
-      animationRef.current = requestAnimationFrame(loop)
+      if (!lastTimeRef.current) lastTimeRef.current = performance.now()
+      scheduleFrame()
     } else if (animationRef.current) {
       cancelAnimationFrame(animationRef.current)
     }
-    return () => { if (animationRef.current) cancelAnimationFrame(animationRef.current) }
-  }, [state.isPlaying])
+    if (!state.isPlaying) lastTimeRef.current = 0
+    return () => { cancelAnimationFrame(animationRef.current); clearTimeout(tickTimerRef.current) }
+  }, [state.isPlaying, renderMode, scheduleFrame])
+
+  useEffect(() => {
+    // The bridge clears and refills one mutable array. Equal-size replacement
+    // batches still need ingesting even if the previous render saw that length.
+    if (renderMode === 'covered' && state.isPlaying && externalEvents?.length) animateRef.current(performance.now())
+  })
 
   // ─── Playback controls ───────────────────────────────────────────────────
   const play = useCallback(() => {

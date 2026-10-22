@@ -1,10 +1,13 @@
+// Branchline fork modifications; see FORK.md.
 'use client'
 
 import { useState, useEffect, useCallback, useRef, memo } from 'react'
 import { TimelineEvent, Z, POPUP, TIMING } from '@/lib/agent-types'
 import { COLORS } from '@/lib/colors'
+import { usePageVisible } from '@/hooks/use-page-visible'
 
 interface ControlBarProps {
+  active?: boolean
   isPlaying: boolean
   speed: number
   currentTime: number
@@ -94,16 +97,17 @@ export function ControlBar(props: ControlBarProps) {
 
 function LiveControlBar({
   currentTime, totalDuration, timelineEvents,
-  eventCount = 0, onEnterReview, isReviewing,
+  eventCount = 0, onEnterReview, isReviewing, active = true,
 }: ControlBarProps) {
+  const visible = usePageVisible()
   const [pulseOn, setPulseOn] = useState(true)
   const scrubberEvents = useScrubberEvents(timelineEvents, totalDuration)
 
   useEffect(() => {
-    if (isReviewing) return
+    if (isReviewing || !active || !visible) return
     const interval = setInterval(() => setPulseOn(p => !p), TIMING.livePulseMs)
     return () => clearInterval(interval)
-  }, [isReviewing])
+  }, [isReviewing, active, visible])
 
   return (
     <div

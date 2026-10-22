@@ -119,13 +119,33 @@ export function normalizeSpendOverviewOptions(raw: Record<string, unknown> = {})
   return { start, end, timezone, provider, model, refresh: raw.refresh === '1' || raw.refresh === true }
 }
 
+// Day labels depend only on an exact timestamp and timezone, never on index
+// progress or query bounds. Keep this pure work across refreshes, with bounded
+// memory even when clients query many zones or a long history.
+const dayCaches = new Map<string, { formatter: Intl.DateTimeFormat; labels: Map<number, string> }>()
+function dayFormatter(timezone: string): (at: number) => string {
+  let cache = dayCaches.get(timezone)
+  if (!cache) {
+    cache = { formatter: new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }), labels: new Map() }
+    dayCaches.set(timezone, cache)
+    while (dayCaches.size > 4) dayCaches.delete(dayCaches.keys().next().value!)
+  }
+  const { formatter, labels } = cache
+  return at => {
+    let label = labels.get(at)
+    if (label === undefined) {
+      const parts = formatter.formatToParts(at)
+      label = ['year', 'month', 'day'].map(type => parts.find(part => part.type === type)!.value).join('-')
+      labels.set(at, label)
+      while (labels.size > 8192) labels.delete(labels.keys().next().value!)
+    }
+    return label
+  }
+}
+
 export function buildSpendOverview(views: Iterable<SpendSummaryView>, status: SpendOverviewStatus, options: SpendOverviewOptions = {}, now = Date.now()): SpendOverviewResponse {
   const end = options.end ?? now, start = options.start
-  const formatter = new Intl.DateTimeFormat('en-CA', { timeZone: options.timezone || 'UTC', year: 'numeric', month: '2-digit', day: '2-digit' })
-  const dayFor = (at: number) => {
-    const parts = formatter.formatToParts(at)
-    return ['year', 'month', 'day'].map(type => parts.find(part => part.type === type)!.value).join('-')
-  }
+  const dayFor = dayFormatter(options.timezone || 'UTC')
   const result: SpendOverviewResponse = { status: { ...status }, window: { start: start ?? null, end },
     totals: { ...base(), untimedResponses: 0, untimedKnownCostUSD: 0, breakdownUSD: emptyBreakdown(), tokens: emptyTokens() },
     days: [], providers: [], models: [], sessions: [] }

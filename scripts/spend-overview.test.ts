@@ -461,3 +461,40 @@ test('counts inline-only Claude children alongside the root without inventing se
   assert.equal(result.sessions[0].agentCount, 2)
   assert.equal(result.totals.records, 1)
 })
+
+// Catches repeating costly Intl formatting for unchanged buckets or caching a whole response past a live change.
+test('reuses exact timezone day labels while keeping query windows, progress and new buckets current', () => {
+  const now = Date.parse('2040-01-04T00:00:00Z')
+  const session = { id: root, label: 'Repeated overview', startTime: now, lastActivityTime: now, status: 'completed' as const }
+  const records = [
+    { timestamp: Date.parse('2040-01-01T18:30:00Z'), costUSD: 1 },
+    { timestamp: Date.parse('2040-01-02T18:30:00Z'), costUSD: 2 },
+  ]
+  const summary = summarizeSpendRecords(session, 1, records, now)
+  const views = [{ session, agentCount: 1, summary }]
+  const status = { state: 'indexing' as const, processed: 1, total: 2, indexed: 1 }
+  const format = Intl.DateTimeFormat.prototype.formatToParts
+  let formatted = 0
+  Intl.DateTimeFormat.prototype.formatToParts = function(...args) { formatted++; return format.apply(this, args) }
+  try {
+    const first = buildSpendOverview(views, status, { timezone: 'Asia/Kathmandu' }, now)
+    assert.deepEqual(first.days.map(day => day.day), ['2040-01-02', '2040-01-03'])
+    assert.equal(first.totals.knownCostUSD, 3)
+    const repeated = buildSpendOverview(views, { ...status, processed: 2 }, { timezone: 'Asia/Kathmandu' }, now + 1000)
+    assert.deepEqual(repeated.days, first.days)
+    assert.equal(repeated.window.end, now + 1000)
+    assert.equal(repeated.status.processed, 2)
+    assert.equal(formatted, 2, 'Unchanged exact timestamps need no additional Intl work')
+    const utc = buildSpendOverview(views, status, { timezone: 'UTC' }, now)
+    assert.deepEqual(utc.days.map(day => day.day), ['2040-01-01', '2040-01-02'])
+    views[0].summary = summarizeSpendRecords(session, 1, [...records,
+      { timestamp: Date.parse('2040-01-03T18:30:00Z'), costUSD: 4 },
+    ], now)
+    const changed = buildSpendOverview(views, status, { timezone: 'Asia/Kathmandu' }, now)
+    assert.deepEqual(changed.days.map(day => day.day), ['2040-01-02', '2040-01-03', '2040-01-04'])
+    assert.equal(changed.totals.knownCostUSD, 7)
+    assert.equal(formatted, 5)
+  } finally {
+    Intl.DateTimeFormat.prototype.formatToParts = format
+  }
+})

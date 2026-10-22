@@ -1,8 +1,9 @@
 // Branchline fork modifications; see FORK.md.
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import { useCostHistory } from '@/hooks/use-cost-history'
+import { usePageVisible } from '@/hooks/use-page-visible'
 import { compareBurnDays, dayBurnWindows, localDay, shiftDay, type BurnSource, type DayBurnWindow } from '@/hooks/burn-comparison'
 import type { CostHistory, CostHistoryOptions } from '../../../extension/src/cost-history'
 import { costDollar } from './cost-analytics-controls'
@@ -31,17 +32,18 @@ function DayHistory({ sessionId, options, window, enabled, live, onResult }: {
   return null
 }
 
-export function DailyBurnComparison({ sessionId, options, source, sourceLabel, cacheWritesUnknown, enabled = true, initialDay }: {
+export const DailyBurnComparison = memo(function DailyBurnComparison({ sessionId, options, source, sourceLabel, cacheWritesUnknown, enabled = true, initialDay }: {
   sessionId: string | null; options: CostHistoryOptions; source: BurnSource; sourceLabel: string; cacheWritesUnknown: boolean; enabled?: boolean; initialDay?: string;
 }) {
+  const visible = usePageVisible()
   const [cutoff, setCutoff] = useState(() => Math.floor(Date.now() / 60000) * 60000)
   useEffect(() => {
-    if (!enabled) return
+    if (!enabled || !visible) return
     const refresh = () => setCutoff(Math.floor(Date.now() / 60000) * 60000)
     refresh()
     const timer = setInterval(refresh, 60000)
     return () => clearInterval(timer)
-  }, [enabled])
+  }, [enabled, visible])
   const today = localDay(cutoff)
   const [chosenSource, setChosenSource] = useState<string | null>(initialDay ?? null)
   const [chosenDays, setChosenDays] = useState<string[] | null>(null)
@@ -64,7 +66,7 @@ export function DailyBurnComparison({ sessionId, options, source, sourceLabel, c
     if (complete) setSnapshot({ scope, days: windows.map(window => ({ window, history: results[window.day].history! })) })
   }, [complete, results, scope, windows])
   const data = snapshot?.scope === scope ? snapshot : undefined
-  const comparison = data ? compareBurnDays(data.days, source) : null
+  const comparison = useMemo(() => data ? compareBurnDays(data.days, source) : null, [data, source])
   const errors = windows.map(window => results[window.day]).filter((result, i) => result?.key === requestKey(sessionId, options, windows[i]) && result.error)
   const unknown = source === 'cacheWrite' && cacheWritesUnknown && comparison?.days.every(day => day.period.spentUSD === 0)
   const base = comparison?.days[0], reference = comparison?.days[1]
@@ -129,4 +131,4 @@ export function DailyBurnComparison({ sessionId, options, source, sourceLabel, c
               </details>
             </>}
   </section>
-}
+})

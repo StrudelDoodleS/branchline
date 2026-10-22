@@ -6,6 +6,8 @@
 import * as http from 'http'
 import * as fs from 'fs'
 import * as path from 'path'
+import { createHash } from 'node:crypto'
+import { gzipSync } from 'node:zlib'
 
 const WEBVIEW_DIR = path.join(__dirname, 'webview')
 
@@ -30,12 +32,43 @@ const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html',
 }
 
-export function serveStatic(req: http.IncomingMessage, res: http.ServerResponse) {
+interface Representation { content: Buffer; etag: string }
+interface CachedAsset { signature: string; identity: Representation; gzip?: Representation }
+const assets = new Map<string, CachedAsset>()
+const representation = (content: Buffer): Representation => ({ content,
+  etag: `"${createHash('sha256').update(content).digest('hex')}"` })
+const html: CachedAsset = { signature: '', identity: representation(Buffer.from(HTML_SHELL)) }
+
+function acceptsGzip(header = ''): boolean {
+  const encodings = new Map(header.toLowerCase().split(',').map(value => {
+    const [name, ...parameters] = value.trim().split(';')
+    const quality = parameters.find(parameter => parameter.trim().startsWith('q='))
+    return [name.trim(), quality === undefined ? 1 : Number(quality.trim().slice(2))] as const
+  }))
+  return (encodings.get('gzip') ?? encodings.get('*') ?? 0) > 0
+}
+
+function sendAsset(req: http.IncomingMessage, res: http.ServerResponse, asset: CachedAsset, mime: string): void {
+  const zipped = acceptsGzip(req.headers['accept-encoding'])
+  // Compress once per asset generation, keeping repeated loads off the CPU.
+  const selected = zipped ? asset.gzip ??= representation(gzipSync(asset.identity.content)) : asset.identity
+  const headers: http.OutgoingHttpHeaders = { 'Content-Type': mime, 'Cache-Control': 'no-cache',
+    'ETag': selected.etag, 'Vary': 'Accept-Encoding', ...(zipped ? { 'Content-Encoding': 'gzip' } : {}) }
+  const condition = req.headers['if-none-match']
+  if (condition?.split(',').some(tag => tag.trim() === '*' || tag.trim().replace(/^W\//, '') === selected.etag)) {
+    res.writeHead(304, headers)
+    res.end()
+    return
+  }
+  res.writeHead(200, { ...headers, 'Content-Length': selected.content.length })
+  res.end(selected.content)
+}
+
+export function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, webviewDir = WEBVIEW_DIR) {
   const url = req.url || '/'
 
   if (url === '/' || url === '/index.html') {
-    res.writeHead(200, { 'Content-Type': 'text/html' })
-    res.end(HTML_SHELL)
+    sendAsset(req, res, html, 'text/html')
     return
   }
 
@@ -50,20 +83,29 @@ export function serveStatic(req: http.IncomingMessage, res: http.ServerResponse)
     return
   }
 
-  const filePath = path.join(WEBVIEW_DIR, basename)
+  const filePath = path.join(webviewDir, basename)
 
   // Prevent path traversal
-  if (!filePath.startsWith(WEBVIEW_DIR)) {
+  if (!filePath.startsWith(webviewDir)) {
     res.writeHead(403)
     res.end('Forbidden')
     return
   }
 
   try {
-    const content = fs.readFileSync(filePath)
-    res.writeHead(200, { 'Content-Type': mime })
-    res.end(content)
+    const stat = fs.statSync(filePath, { bigint: true })
+    const signature = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`
+    let asset = assets.get(filePath)
+    if (asset?.signature !== signature) {
+      asset = { signature, identity: representation(fs.readFileSync(filePath)) }
+      assets.delete(filePath)
+      assets.set(filePath, asset)
+      // The UI has only a few assets; bound memory for other requested files.
+      while (assets.size > 8) assets.delete(assets.keys().next().value!)
+    }
+    sendAsset(req, res, asset, mime)
   } catch {
+    assets.delete(filePath)
     res.writeHead(404)
     res.end('Not found')
   }

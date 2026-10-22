@@ -30,9 +30,20 @@ import { SpendDashboard } from "./spend-dashboard"
 import { sessionUsage } from "@/lib/usage"
 import { useAudioEffects } from "@/hooks/use-audio-effects"
 import { localDay } from "@/hooks/burn-comparison"
+import { usePageVisible, useMediaQuery } from "@/hooks/use-page-visible"
+import type { SessionInfo } from "@/lib/bridge-types"
 
 export function AgentVisualizer() {
+  const pageVisible = usePageVisible()
+  const phoneLayout = useMediaQuery('(max-width: 639px)')
+  const touchDevice = useMediaQuery('(pointer: coarse)')
+  const [viewMode, setViewMode] = useState<'tree' | 'graph'>('tree')
+  const [showCostOverlay, setShowCostOverlay] = useState(false)
+  const [showSpendDashboard, setShowSpendDashboard] = useState(false)
+  const graphicsCovered = showSpendDashboard || (showCostOverlay && phoneLayout)
   const bridge = useVSCodeBridge()
+  const spendSessionsRef = useRef(bridge.sessions)
+  spendSessionsRef.current = bridge.sessions
   const selectedSessionInfo = bridge.sessions.find(session => session.id === bridge.selectedSessionId)
 
   const {
@@ -58,6 +69,8 @@ export function AgentVisualizer() {
     saveSnapshot,
     restoreSnapshot,
   } = useAgentSimulation({
+    renderMode: !pageVisible ? 'hidden' : graphicsCovered ? 'covered' : viewMode,
+    reducedFrameRate: touchDevice,
     useMockData: bridge.useMockData,
     externalEvents: bridge.pendingEvents,
     onExternalEventsConsumed: bridge.consumeEvents,
@@ -76,15 +89,21 @@ export function AgentVisualizer() {
 
   const [showStats, setShowStats] = useState(false)
   const [showHexGrid, setShowHexGrid] = useState(true)
-  const [showCostOverlay, setShowCostOverlay] = useState(false)
-  const [showSpendDashboard, setShowSpendDashboard] = useState(false)
   const [costsFromDashboard, setCostsFromDashboard] = useState(false)
   const allCostsTriggerRef = useRef<HTMLButtonElement>(null)
   const [showTimeline, setShowTimeline] = useState(false)
   const [showFileAttention, setShowFileAttention] = useState(false)
   const [showTranscript, setShowTranscript] = useState(false)
   const [headerHeight, setHeaderHeight] = useState(36)
-  const [viewMode, setViewMode] = useState<'tree' | 'graph'>('tree')
+
+  const closeSpendDashboard = useCallback(() => setShowSpendDashboard(false), [])
+  const selectSpendSession = useCallback((session: SessionInfo) => {
+    const live = spendSessionsRef.current.find(row => row.id === session.id && !row.historical)
+    bridge.selectSession(session.id, live ? undefined : session)
+    setCostsFromDashboard(true)
+    setShowSpendDashboard(false)
+    setShowCostOverlay(true)
+  }, [bridge.selectSession])
 
   // Mutually exclusive panel toggling — opening one closes the others
   const toggleExclusivePanel = useCallback((panel: 'files' | 'transcript' | 'cost') => {
@@ -314,6 +333,7 @@ export function AgentVisualizer() {
 
       {/* Graph fits between the header and bottom controls. */}
       {viewMode === 'graph' && <AgentCanvas
+        active={pageVisible && !graphicsCovered}
         key={`${bridge.selectedSessionId ?? 'empty'}:${bridge.sessionResetVersion}`}
         simulationRef={frameRef}
         selectedAgentId={selection.selectedAgentId}
@@ -406,6 +426,7 @@ export function AgentVisualizer() {
 
       {/* Floating control strip */}
       <ControlBar
+        active={pageVisible && !graphicsCovered}
         isPlaying={isPlaying}
         speed={speed}
         currentTime={currentTime}
@@ -454,14 +475,7 @@ export function AgentVisualizer() {
         onBack={costsFromDashboard ? () => { setShowCostOverlay(false); setShowSpendDashboard(true) } : undefined}
         onClose={() => setShowCostOverlay(false)} />
 
-      <SpendDashboard visible={showSpendDashboard} returnFocusRef={allCostsTriggerRef} onClose={() => setShowSpendDashboard(false)}
-        onSelectSession={session => {
-          const live = bridge.sessions.find(row => row.id === session.id && !row.historical)
-          bridge.selectSession(session.id, live ? undefined : session)
-          setCostsFromDashboard(true)
-          setShowSpendDashboard(false)
-          setShowCostOverlay(true)
-        }} />
+      <SpendDashboard visible={showSpendDashboard} returnFocusRef={allCostsTriggerRef} onClose={closeSpendDashboard} onSelectSession={selectSpendSession} />
 
       <TimelinePanel
         visible={showTimeline}

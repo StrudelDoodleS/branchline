@@ -111,6 +111,9 @@ export interface ForceLink extends SimulationLinkDatum<ForceNode> {
 }
 
 export interface UseAgentSimulationOptions {
+  /** Graph animates; tree ticks coarsely; covered views process only new data. */
+  renderMode?: 'graph' | 'tree' | 'covered' | 'hidden'
+  reducedFrameRate?: boolean
   /** If true, use MOCK_SCENARIO for demo playback. Default: true */
   useMockData?: boolean
   /** External events to process (from VS Code bridge). Consumed each frame. */

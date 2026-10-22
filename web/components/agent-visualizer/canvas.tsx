@@ -25,6 +25,7 @@ import { useCanvasCamera } from '@/hooks/use-canvas-camera'
 import { useCanvasInteraction } from '@/hooks/use-canvas-interaction'
 
 interface CanvasProps {
+  active?: boolean
   /** Ref to simulation state — read every frame without React re-renders */
   simulationRef: React.RefObject<SimulationState>
   selectedAgentId: string | null
@@ -45,6 +46,7 @@ interface CanvasProps {
 }
 
 export function AgentCanvas({
+  active = true,
   simulationRef,
   selectedAgentId, hoveredAgentId, showStats, showHexGrid, zoomToFitTrigger, pauseAutoFit,
   onAgentClick, onAgentHover, onAgentDrag, onContextMenu, onToolCallClick, selectedToolCallId, onDiscoveryClick, selectedDiscoveryId, showCostOverlay,
@@ -59,6 +61,8 @@ export function AgentCanvas({
   const depthParticlesRef = useRef<DepthParticle[]>([])
   const lastFrameTimeRef = useRef(0)
   const dprRef = useRef(1)
+  const touchDeviceRef = useRef(false)
+  const interactionUntilRef = useRef(0)
 
   // Effects system
   const effectsRef = useRef<VisualEffect[]>([])
@@ -126,7 +130,8 @@ export function AgentCanvas({
   // ─── Setup ──────────────────────────────────────────────────────────────
 
   useEffect(() => {
-    bloomRef.current = new BloomRenderer(0.5)
+    touchDeviceRef.current = matchMedia('(pointer: coarse)').matches
+    bloomRef.current = new BloomRenderer(0.5, touchDeviceRef.current ? 'light' : 'full')
     depthParticlesRef.current = createDepthParticles(dimensions.width, dimensions.height)
     return () => { bloomRef.current = null }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- particles created once, resized by draw loop
@@ -170,6 +175,8 @@ export function AgentCanvas({
 
   const draw = useCallback((timestamp: number) => {
     animationRef.current = requestAnimationFrame((ts) => drawRef.current(ts))
+    if (touchDeviceRef.current && timestamp > interactionUntilRef.current && !panVelocityRef.current.active
+      && lastFrameTimeRef.current && timestamp - lastFrameTimeRef.current < 1000 / 30 - 1) return
 
     const canvas = mainCanvasRef.current
     if (!canvas) return
@@ -215,7 +222,7 @@ export function AgentCanvas({
       }
 
       // Camera physics (inertia + auto-fit)
-      updateCamera(isDragging, pauseAutoFit)
+      updateCamera(isDragging, pauseAutoFit, deltaTime)
 
       // Floaty agent drag
       updateDragLerp(agents, onAgentDrag)
@@ -334,14 +341,19 @@ export function AgentCanvas({
   drawRef.current = draw
 
   useEffect(() => {
+    if (!active) return
+    lastFrameTimeRef.current = 0
     const loop = (timestamp: number) => drawRef.current(timestamp)
     animationRef.current = requestAnimationFrame(loop)
     return () => { if (animationRef.current) cancelAnimationFrame(animationRef.current) }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- drawRef is stable; rAF loop set up once
-  }, [])
+  }, [active])
 
   return (
-    <div ref={containerRef} className="absolute inset-x-0 overflow-hidden" style={{ top: 'calc(var(--agent-controls-bottom, 48px) + 40px)', bottom: 88, cursor: isDragging ? 'grabbing' : 'grab' }}>
+    <div ref={containerRef} onPointerDownCapture={() => { interactionUntilRef.current = performance.now() + 600 }}
+      onPointerMoveCapture={() => { interactionUntilRef.current = performance.now() + 600 }}
+      onWheelCapture={() => { interactionUntilRef.current = performance.now() + 600 }}
+      className="absolute inset-x-0 overflow-hidden" style={{ top: 'calc(var(--agent-controls-bottom, 48px) + 40px)', bottom: 88, cursor: isDragging ? 'grabbing' : 'grab' }}>
       <canvas
         ref={mainCanvasRef}
         style={{ width: dimensions.width, height: dimensions.height, touchAction: 'none' }}

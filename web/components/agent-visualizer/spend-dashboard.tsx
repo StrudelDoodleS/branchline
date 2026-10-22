@@ -1,7 +1,7 @@
 // Branchline fork modifications; see FORK.md.
 'use client'
 
-import { useEffect, useMemo, useRef, useState, type RefObject } from 'react'
+import { memo, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import type { SessionInfo } from '@/lib/bridge-types'
 import { providerName } from '@/lib/session-browser'
@@ -15,7 +15,7 @@ const button = 'min-h-11 min-w-11 rounded-lg border px-3 text-sm focus-visible:o
 const choices = [['all', 'All time'], ['today', 'Today'], ['week', '7 days'], ['month', '30 days']] as const
 const sources = [ ['input', 'Input', '#60a5fa'], ['output', 'Output', '#fb923c'], ['cacheRead', 'Cache read', '#86efac'], ['cacheWrite', 'Cache write · reported', '#d8b4fe'], ['unattributed', 'Other reported costs', '#cbd5e1'] ] as const
 
-function DailySpend({ days, window }: Pick<SpendOverviewResponse, 'days' | 'window'>) {
+const DailySpend = memo(function DailySpend({ days, window }: Pick<SpendOverviewResponse, 'days' | 'window'>) {
   const series = useMemo(() => {
     const first = window.start === null ? days[0]?.day : localDay(window.start)
     if (!first) return []
@@ -41,9 +41,9 @@ function DailySpend({ days, window }: Pick<SpendOverviewResponse, 'days' | 'wind
     </svg>
     <div className="flex justify-between gap-2 text-xs text-slate-400"><span>{series[0] ? short(series[0].day) : 'No dated usage'}</span><span>{series.at(-1) ? short(series.at(-1)!.day) : ''}</span></div>
   </div>
-}
+})
 
-export function SpendDashboard({ visible, onClose, onSelectSession, returnFocusRef }: {
+export const SpendDashboard = memo(function SpendDashboard({ visible, onClose, onSelectSession, returnFocusRef }: {
   visible: boolean; onClose: () => void; onSelectSession: (session: SessionInfo) => void; returnFocusRef: RefObject<HTMLButtonElement | null>
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null)
@@ -73,6 +73,16 @@ export function SpendDashboard({ visible, onClose, onSelectSession, returnFocusR
       .sort((a, b) => sort === 'recent' ? b.session.lastActivityTime - a.session.lastActivityTime : b.knownCostUSD - a.knownCostUSD || b.session.lastActivityTime - a.session.lastActivityTime)
     return { providers, rows, selectedModel: data?.models.find(row => row.id === model) }
   }, [visible, data, search, sort, provider, model])
+  const sessionRows = useMemo(() => rows.map(row => <li key={row.session.id}>
+    <button type="button" aria-label={`Open costs for ${row.session.label}`} data-spend-session={row.session.id} onClick={() => onSelectSession(row.session)}
+      className="flex min-h-16 w-full items-start justify-between gap-3 rounded-xl border border-slate-700 bg-slate-800/50 p-3 text-left hover:border-cyan-500 focus-visible:outline-2 focus-visible:outline-cyan-300">
+      <span className="min-w-0"><span className="block break-words text-sm font-medium leading-5 [overflow-wrap:anywhere]">{row.session.label}</span>
+        <span className="mt-1 block truncate text-xs text-slate-400">{row.session.project || providerName(row.session.provider || 'unknown')}</span>
+        <span className="mt-1 block text-xs text-slate-300">{providerName(row.session.provider || 'unknown')} · {new Date(row.session.lastActivityTime).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}{row.indexed ? ` · ${row.agentCount} ${row.agentCount === 1 ? 'agent' : 'agents'}` : ''}</span>
+      </span>
+      <span className="shrink-0 text-right text-sm font-semibold tabular-nums text-cyan-100">{row.indexed ? money(row.knownCostUSD) : 'Pending'}{row.unpricedResponses > 0 && <span className="mt-1 block text-xs font-normal text-amber-200">+ unpriced</span>}{row.stale && <span className="mt-1 block text-xs font-normal text-slate-400">{status?.state === 'indexing' ? 'Updating' : 'Needs refresh'}</span>}</span>
+    </button>
+  </li>), [rows, onSelectSession, status?.state])
   const total = data?.totals
   const retry = () => { setAt(Date.now()); refresh() }
 
@@ -147,19 +157,10 @@ export function SpendDashboard({ visible, onClose, onSelectSession, returnFocusR
             {(['spend', 'recent'] as const).map(value => <button key={value} type="button" aria-pressed={sort === value} onClick={() => setSort(value)}
               className={`${button} ${sort === value ? 'border-cyan-400 bg-cyan-950 text-cyan-100' : 'border-slate-600 bg-slate-800'}`}>{value === 'spend' ? 'Highest spend' : 'Last activity'}</button>)}
           </div>
-          <ul aria-label="Session costs" className="mt-3 space-y-2">{rows.map(row => <li key={row.session.id}>
-            <button type="button" aria-label={`Open costs for ${row.session.label}`} data-spend-session={row.session.id} onClick={() => onSelectSession(row.session)}
-              className="flex min-h-16 w-full items-start justify-between gap-3 rounded-xl border border-slate-700 bg-slate-800/50 p-3 text-left hover:border-cyan-500 focus-visible:outline-2 focus-visible:outline-cyan-300">
-              <span className="min-w-0"><span className="block break-words text-sm font-medium leading-5 [overflow-wrap:anywhere]">{row.session.label}</span>
-                <span className="mt-1 block truncate text-xs text-slate-400">{row.session.project || providerName(row.session.provider || 'unknown')}</span>
-                <span className="mt-1 block text-xs text-slate-300">{providerName(row.session.provider || 'unknown')} · {new Date(row.session.lastActivityTime).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}{row.indexed ? ` · ${row.agentCount} ${row.agentCount === 1 ? 'agent' : 'agents'}` : ''}</span>
-              </span>
-              <span className="shrink-0 text-right text-sm font-semibold tabular-nums text-cyan-100">{row.indexed ? money(row.knownCostUSD) : 'Pending'}{row.unpricedResponses > 0 && <span className="mt-1 block text-xs font-normal text-amber-200">+ unpriced</span>}{row.stale && <span className="mt-1 block text-xs font-normal text-slate-400">{status?.state === 'indexing' ? 'Updating' : 'Needs refresh'}</span>}</span>
-            </button>
-          </li>)}</ul>
+          <ul aria-label="Session costs" className="mt-3 space-y-2">{sessionRows}</ul>
           {!!data && !rows.length && <p className="py-5 text-sm text-slate-400">{search ? 'No sessions match your search.' : 'No saved sessions for this provider.'}</p>}
         </section>
       </div>
     </div>
   </dialog>, document.body)
-}
+})
