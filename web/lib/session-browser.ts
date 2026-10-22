@@ -32,10 +32,11 @@ export function browseSessions(sessions: SessionInfo[], filters: SessionFilters,
 }
 
 export function groupSessionsByActivity(sessions: SessionInfo[], now = Date.now()): { id: string; sessions: SessionInfo[] }[] {
-  const groups = new Map<string, SessionInfo[]>([['recent', []]])
+  const groups = new Map<string, SessionInfo[]>([['active', []], ['recent', []]])
   for (const session of browseSessions(sessions, {}, now)) {
     const date = new Date(session.lastActivityTime)
-    const id = session.lastActivityTime >= now - 86400000 ? 'recent'
+    const id = session.historical !== true && session.status === 'active' ? 'active'
+      : session.lastActivityTime >= now - 86400000 ? 'recent'
       : `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
     if (!groups.has(id)) groups.set(id, [])
     groups.get(id)!.push(session)

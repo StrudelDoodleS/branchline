@@ -7,6 +7,7 @@ import * as path from 'node:path'
 import { createInterface } from 'node:readline'
 import type { SessionInfo } from '../extension/src/protocol'
 import { claudeUsageCalls, normalizeClaudeUsage, UsageLedger, CodexUsageTracker, type CostRecord } from '../extension/src/token-usage'
+import { codexSessionHierarchy } from '../extension/src/codex-session-metadata'
 
 interface CatalogOptions {
   claudeDir?: string
@@ -373,11 +374,10 @@ export class SessionCatalog {
         if (candidate.runtime === 'codex' && entry.type === 'session_meta') {
           id = string(payload.id)
           valid = Boolean(id)
-          const source = object(payload.source), subagent = object(source.subagent), spawn = object(subagent.thread_spawn)
-          child = 'subagent' in source || payload.source === 'subagent'
-          parentId = string(spawn.parent_thread_id)
-          agentName = string(payload.agent_path) ?? string(spawn.agent_path) ?? string(payload.agent_nickname) ?? string(spawn.agent_nickname) ?? (child ? 'Subagent' : 'Main session')
-          if (agentName.includes('/')) agentName = path.posix.basename(agentName)
+          const hierarchy = codexSessionHierarchy(payload)
+          child = hierarchy.child
+          parentId = hierarchy.parentId
+          agentName = hierarchy.agentName
           project = string(payload.cwd) ?? project
           title = label(payload.thread_name) ?? label(payload.title) ?? title
           model = string(payload.model) ?? model

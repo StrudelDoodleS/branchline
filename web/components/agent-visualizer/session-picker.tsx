@@ -37,7 +37,7 @@ export function SessionPicker({ open, onClose, returnFocusRef, sessions, selecte
   }, [open, returnFocusRef])
 
   useLayoutEffect(() => {
-    // Live activity can move a focused session from a dated group into Recent.
+    // Starting or finishing work can move a focused session between groups.
     // Its old button is removed; keep keyboard focus on the same session.
     const dialog = dialogRef.current
     if (!open || !dialog?.open || !focusedSessionId.current || document.activeElement !== document.body) return
@@ -78,18 +78,18 @@ export function SessionPicker({ open, onClose, returnFocusRef, sessions, selecte
       <ul aria-label="Sessions by last activity" className="space-y-1">
         {groups.map(group => {
           const isExpanded = expanded[group.id] ?? !!search.trim()
-          const label = group.id === 'recent' ? 'Active' : new Date(`${group.id}T12:00:00`).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
+          const label = group.id === 'active' ? 'Active now' : group.id === 'recent' ? 'Recent' : new Date(`${group.id}T12:00:00`).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
           return <li key={group.id} data-session-group={group.id}>
             <button type="button" data-session-group-toggle aria-expanded={isExpanded} aria-controls={`${id}-${group.id}`}
               onClick={() => setExpanded(previous => ({ ...previous, [group.id]: !isExpanded }))}
               className={`flex min-h-14 w-full items-center gap-2 rounded-lg px-2 text-left hover:bg-slate-800 ${focus}`}>
-              <span className={`min-w-0 flex-1 text-sm font-semibold ${group.id === 'recent' ? 'text-cyan-100' : 'text-slate-100'}`}>
+              <span className={`min-w-0 flex-1 text-sm font-semibold ${group.id === 'active' ? 'text-cyan-100' : 'text-slate-100'}`}>
                 {label}{group.id === 'recent' && <span className="ml-2 text-xs font-normal text-slate-300">last 24 hours</span>}
               </span>
-              <span className="rounded-md bg-slate-800 px-2 py-1 text-xs tabular-nums text-slate-300">{group.sessions.length}</span>
+              <span data-session-group-count className="rounded-md bg-slate-800 px-2 py-1 text-xs tabular-nums text-slate-300">{group.sessions.length}</span>
               <span aria-hidden="true" className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-slate-600 text-xl text-slate-100">{isExpanded ? '−' : '+'}</span>
             </button>
-            <ul id={`${id}-${group.id}`} hidden={!isExpanded} aria-label={group.id === 'recent' ? 'Sessions active in the last 24 hours' : `Sessions last active ${label}`} className="space-y-1 pb-2 pl-3">
+            <ul id={`${id}-${group.id}`} hidden={!isExpanded} aria-label={group.id === 'active' ? 'Currently working sessions' : group.id === 'recent' ? 'Other sessions used in the last 24 hours' : `Sessions last active ${label}`} className="space-y-1 pb-2 pl-3">
               {group.sessions.map(session => <li key={session.id}>
                 <button type="button" data-session-choice={session.id} aria-current={selectedSessionId === session.id ? 'true' : undefined}
                   onClick={() => { onSelectSession(session.id, session.historical ? session : undefined); onClose() }}
@@ -101,13 +101,13 @@ export function SessionPicker({ open, onClose, returnFocusRef, sessions, selecte
                   {session.project && <span className="mt-0.5 block truncate text-xs text-slate-300" title={session.project}>{session.project}</span>}
                   <span className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-300">
                     <span>{providerName(sessionProvider(session))}</span>
-                    <span>{group.id === 'recent' ? `${shortDate(session.lastActivityTime)} · ` : ''}{clock(session.lastActivityTime)}</span>
+                    <span>{group.id === 'active' || group.id === 'recent' ? `${shortDate(session.lastActivityTime)} · ` : ''}{clock(session.lastActivityTime)}</span>
                     <span className={session.historical ? 'text-slate-400' : session.status === 'active' ? 'text-emerald-300' : 'text-slate-300'}>{session.historical ? 'Saved' : session.status === 'active' ? 'Working' : 'Idle'}</span>
                     {sessionsWithActivity.has(session.id) && <span className="text-amber-200">New activity</span>}
                   </span>
                 </button>
               </li>)}
-              {!group.sessions.length && <li className="px-3 py-3 text-sm text-slate-400">No sessions used in the last 24 hours.</li>}
+              {!group.sessions.length && <li className="px-3 py-3 text-sm text-slate-400">{group.id === 'active' ? 'No active sessions.' : 'No other sessions used in the last 24 hours.'}</li>}
             </ul>
           </li>
         })}

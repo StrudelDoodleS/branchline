@@ -62,26 +62,40 @@ async def choose_session(page, session_id):
 async def session_picker_accordion(page):
     await expect(session_picker(page)).to_have_accessible_description('Solver review')
     old_time = await page.evaluate('new Date(2026,9,1,14).getTime()')
+    now = await page.evaluate('Date.now()')
     saved = [dict(id='old-claude', label='Editor specification with a long readable title', status='completed', startTime=old_time,
                   lastActivityTime=old_time, runtime='claude', provider='anthropic', historical=True, project='superglm'),
              dict(id='old-codex', label='Inference suite', status='completed', startTime=old_time,
-                  lastActivityTime=old_time, runtime='codex', provider='openai', historical=True, project='superlss')]
+                  lastActivityTime=old_time, runtime='codex', provider='openai', historical=True, project='superlss'),
+             dict(id='recent-done', label='Finished recently', status='completed', startTime=now-5000,
+                  lastActivityTime=now-1000, runtime='codex', provider='openai', historical=True),
+             dict(id='saved-active', label='Saved with an old active flag', status='active', startTime=now-10000,
+                  lastActivityTime=now-2000, runtime='claude', provider='anthropic', historical=True)]
     await page.route('**/session-catalog*', lambda route: route.fulfill(status=200, content_type='application/json', body=json.dumps(dict(sessions=saved))))
     await session_picker(page).click()
     panel = page.get_by_role('dialog', name='Sessions', exact=True)
     await expect(panel).to_be_visible()
     await expect(panel.get_by_role('button', name='Close sessions', exact=True)).to_be_focused()
     await expect(panel.get_by_role('combobox')).to_have_count(0)
-    await expect(panel.get_by_label('Session matches', exact=True)).to_contain_text('4 sessions')
-    recent = panel.locator('li[data-session-group="recent"]')
-    toggle = recent.locator('button[data-session-group-toggle]')
-    await expect(toggle).to_contain_text('Active')
-    await expect(toggle).to_contain_text('last 24 hours')
+    await expect(panel.get_by_label('Session matches', exact=True)).to_contain_text('6 sessions')
+    active = panel.locator('li[data-session-group="active"]')
+    toggle = active.locator('button[data-session-group-toggle]')
+    await expect(toggle).to_contain_text('Active now')
+    await expect(active.locator('[data-session-group-count]')).to_have_text('2')
     await expect(toggle).to_have_attribute('aria-expanded', 'false')
     await toggle.click()
-    await expect(recent.locator('[data-session-choice]').first).to_have_attribute('data-session-choice', 'phone-primary')
-    await expect(recent.locator('[data-session-choice]').last).to_have_attribute('data-session-choice', 'phone-other')
-    await expect(recent.locator('[data-session-choice="phone-primary"]')).to_have_attribute('aria-current', 'true')
+    await expect(active.locator('[data-session-choice]').first).to_have_attribute('data-session-choice', 'phone-primary')
+    await expect(active.locator('[data-session-choice]').last).to_have_attribute('data-session-choice', 'phone-other')
+    await expect(active.locator('[data-session-choice="phone-primary"]')).to_have_attribute('aria-current', 'true')
+    recent = panel.locator('li[data-session-group="recent"]')
+    recent_toggle = recent.locator('button[data-session-group-toggle]')
+    await expect(recent_toggle).to_contain_text('Recent')
+    await expect(recent_toggle).to_contain_text('last 24 hours')
+    await expect(recent.locator('[data-session-group-count]')).to_have_text('2')
+    await expect(recent_toggle).to_have_attribute('aria-expanded', 'false')
+    await recent_toggle.click()
+    await expect(recent.locator('[data-session-choice]').first).to_have_attribute('data-session-choice', 'recent-done')
+    await expect(recent.locator('[data-session-choice]').last).to_have_attribute('data-session-choice', 'saved-active')
     dated = panel.locator('li[data-session-group="2026-10-01"]')
     await expect(dated.locator('[data-session-choice="old-claude"]')).to_be_hidden()
     await dated.locator('button[data-session-group-toggle]').click()
@@ -94,7 +108,7 @@ async def session_picker_accordion(page):
     await panel.get_by_role('searchbox', name='Search sessions', exact=True).fill('no such project')
     await expect(panel.get_by_text('No sessions match your search.', exact=True)).to_be_visible()
     await panel.get_by_role('button', name='Clear filters', exact=True).click()
-    await expect(panel.get_by_label('Session matches', exact=True)).to_contain_text('4 sessions')
+    await expect(panel.get_by_label('Session matches', exact=True)).to_contain_text('6 sessions')
     for button in [toggle, panel.get_by_role('button', name='All', exact=True), panel.get_by_role('button', name='Close sessions', exact=True)]:
         box = await button.bounding_box()
         assert box and box['width'] >= 44 and box['height'] >= 44, f'Small session touch target: {box}'
@@ -123,10 +137,16 @@ async def session_picker_live_focus(page):
     await expect(choice).to_be_focused()
     sessions[1].update(lastActivityTime=now,status='active')
     await page.evaluate("sessions=>window.postMessage({type:'session-list',sessions},'*')", sessions)
+    await expect(choice.locator('xpath=ancestor::li[@data-session-group]')).to_have_attribute('data-session-group','active')
+    await expect(choice).to_be_focused()
+    await expect(choice).to_be_visible()
+    await expect(panel.locator('li[data-session-group="active"] button[data-session-group-toggle]')).to_have_attribute('aria-expanded','true')
+    sessions[1].update(lastActivityTime=now+1000,status='completed')
+    await page.evaluate("sessions=>window.postMessage({type:'session-list',sessions},'*')", sessions)
     await expect(choice.locator('xpath=ancestor::li[@data-session-group]')).to_have_attribute('data-session-group','recent')
     await expect(choice).to_be_focused()
     await expect(choice).to_be_visible()
-    await expect(panel.locator('li[data-session-group="recent"] button[data-session-group-toggle]')).to_have_attribute('aria-expanded','true')
+    await expect(panel.locator('li[data-session-group="active"] [data-session-group-count]')).to_have_text('1')
     await expect(session_picker(page)).to_have_attribute('data-session-id','phone-primary')
     await page.keyboard.press('Escape')
     await expect(session_picker(page)).to_be_focused()

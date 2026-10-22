@@ -48,23 +48,28 @@ test('catalog merging keeps one choice per main session and preserves newer desc
   assert.equal(same.status, 'active')
 })
 
-test('session groups use a rolling 24 hours, then local dates, without duplicate sessions', () => {
+test('session groups separate working main sessions from recent history and older dates', () => {
   assert.equal(typeof Browser.groupSessionsByActivity, 'function')
   const now = +new Date(2026, 9, 21, 10, 30)
-  const sessions = [session('old active', +new Date(2026, 9, 15, 12), { status: 'active' }),
+  const sessions = [session('saved active flag', +new Date(2026, 9, 15, 12), { status: 'active', historical: true }),
+    session('working', now - 2000, { status: 'active', historical: false }),
+    session('long-running', +new Date(2026, 9, 1), { status: 'active' }),
+    session('recent saved active flag', now - 3000, { status: 'active', historical: true }),
     session('just outside', now - 86400001), session('recent idle', now - 1000),
     session('boundary', now - 86400000), session('same old date', +new Date(2026, 9, 15, 8)),
     session('previous year', +new Date(2025, 9, 15, 12))]
   const groups = Browser.groupSessionsByActivity(sessions, now)
   assert.deepEqual(groups.map(group => [group.id, group.sessions.map(s => s.id)]), [
-    ['recent', ['recent idle', 'boundary']],
+    ['active', ['working', 'long-running']],
+    ['recent', ['recent idle', 'recent saved active flag', 'boundary']],
     ['2026-10-20', ['just outside']],
-    ['2026-10-15', ['old active', 'same old date']],
+    ['2026-10-15', ['saved active flag', 'same old date']],
     ['2025-10-15', ['previous year']],
   ])
+  assert.equal(new Set(groups.flatMap(group => group.sessions.map(s => s.id))).size, sessions.length)
 })
 
-test('session groups keep an empty recent row and apply provider/search before grouping', () => {
+test('session groups keep empty active/recent rows and apply provider/search before grouping', () => {
   assert.equal(typeof Browser.groupSessionsByActivity, 'function')
   const now = +new Date(2026, 9, 21, 10, 30)
   const filtered = Browser.browseSessions([
@@ -72,7 +77,22 @@ test('session groups keep an empty recent row and apply provider/search before g
     session('codex', now, { provider: 'openai', project: 'branchline' }),
   ], { provider: 'anthropic', search: 'SUPERGLM' }, now)
   assert.deepEqual(Browser.groupSessionsByActivity(filtered, now).map(group => [group.id, group.sessions.map(s => s.id)]), [
-    ['recent', []], ['2026-10-01', ['claude']],
+    ['active', []], ['recent', []], ['2026-10-01', ['claude']],
   ])
-  assert.deepEqual(Browser.groupSessionsByActivity([], now), [{ id: 'recent', sessions: [] }])
+  assert.deepEqual(Browser.groupSessionsByActivity([], now), [{ id: 'active', sessions: [] }, { id: 'recent', sessions: [] }])
+})
+
+test('active counts track current work rather than how many sessions were used today', () => {
+  const now = Date.now()
+  const saved = Array.from({ length: 16 }, (_, i) => session(`finished-${i}`, now - i * 1000, { historical: true }))
+  const live = [session('claude', now, { status: 'active', runtime: 'claude' }),
+    session('codex', now, { status: 'active', runtime: 'codex' })]
+  const groups = Browser.groupSessionsByActivity(Browser.mergeSavedSessions(saved, live), now)
+  assert.equal(groups.find(group => group.id === 'active')?.sessions.length, 2)
+  assert.equal(groups.find(group => group.id === 'recent')?.sessions.length, 16)
+
+  live[0].status = 'completed'
+  const after = Browser.groupSessionsByActivity(Browser.mergeSavedSessions(saved, live), now)
+  assert.deepEqual(after.find(group => group.id === 'active')?.sessions.map(s => s.id), ['codex'])
+  assert.equal(after.find(group => group.id === 'recent')?.sessions.length, 17)
 })

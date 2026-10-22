@@ -5,6 +5,7 @@ import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { SessionCatalog } from './session-catalog'
+import { SpendIndex } from './spend-index'
 
 const rootId = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa'
 const childId = 'bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb'
@@ -37,6 +38,59 @@ async function fixture(t: TestContext) {
   const claude = (id: string) => path.join(claudeDir, '-work-saved-project', `${id}.jsonl`)
   return { directory, options, write, codex, claude }
 }
+
+test('includes a review child once in its canonical root and persisted spend index', async t => {
+  const f = await fixture(t)
+  await f.codex(rootId, undefined, [context, response('root', 1)], false,
+    { source: 'exec', parent_thread_id: null, originator: 'codex_exec' })
+  const review = { source: { subagent: 'review' }, parent_thread_id: rootId, originator: 'codex_exec' }
+  await f.codex(childId, undefined, [context, response('review', 10), response('review', 11)], false, review)
+  await f.codex(childId, undefined, [context, response('review', 9)], true, review)
+  await f.write(path.join(path.dirname(f.options.codexDir), 'session_index.jsonl'), [
+    { id: rootId, thread_name: 'Main task' }, { id: childId, thread_name: 'Internal review' },
+  ])
+  const catalog = new SessionCatalog(f.options)
+  assert.deepEqual((await catalog.list()).map(session => session.id), [rootId])
+  const [snapshot] = await catalog.snapshots()
+  assert.equal(snapshot.agentCount, 2)
+  assert.equal(snapshot.sources.length, 2)
+  assert.equal(snapshot.session.lastActivityTime, time(11))
+  const records = await catalog.recordsForSnapshot(snapshot)
+  assert.deepEqual(records.map(record => [record.agentId, record.agentName]).sort(), [
+    [rootId, 'Main session'], [childId, 'Review'],
+  ])
+  assert.ok(Math.abs(records.reduce((sum, record) => sum + record.costUSD!, 0) - 0.0296) < 1e-12)
+  assert.equal(await catalog.records(childId), undefined)
+
+  const cachePath = path.join(f.directory, 'spend-index.json')
+  const index = new SpendIndex(catalog, { cachePath })
+  await index.overview()
+  await index.whenIdle()
+  const overview = await index.overview()
+  assert.equal(overview.status.state, 'ready')
+  assert.deepEqual(overview.sessions.map(row => row.session.id), [rootId])
+  assert.equal(overview.sessions[0].agentCount, 2)
+  assert.equal(overview.totals.records, 2)
+  assert.ok(Math.abs(overview.totals.knownCostUSD - 0.0296) < 1e-12)
+  const persisted = JSON.parse(await fs.readFile(cachePath, 'utf8'))
+  assert.deepEqual(persisted.entries.map((entry: { session: { id: string } }) => entry.session.id), [rootId])
+})
+
+test('keeps ordinary forks as roots while preferring nested parents and accepting explicit subagent sources', async t => {
+  const f = await fixture(t)
+  await f.codex(rootId, undefined, [context, response('root', 1)], false, { source: 'exec', parent_thread_id: null })
+  await f.codex(otherId, undefined, [context, response('fork', 2)], false, { source: 'exec', parent_thread_id: rootId })
+  await f.codex(childId, rootId, [context, response('nested', 3)], false, { parent_thread_id: otherId })
+  await f.codex(grandchildId, undefined, [context, response('legacy', 4)], false,
+    { source: 'subagent', parent_thread_id: rootId, agent_nickname: 'Legacy child' })
+  const catalog = new SessionCatalog(f.options)
+  assert.deepEqual((await catalog.list()).map(session => session.id).sort(), [rootId, otherId])
+  const records = (await catalog.records(rootId))!
+  assert.deepEqual(records.map(record => [record.agentId, record.agentName]).sort(), [
+    [rootId, 'Main session'], [childId, 'reviewer'], [grandchildId, 'Legacy child'],
+  ])
+  assert.deepEqual((await catalog.records(otherId))!.map(record => record.agentId), [otherId])
+})
 
 test('lists old main sessions from every directory, with saved titles, providers and descendant activity', async t => {
   const f = await fixture(t)

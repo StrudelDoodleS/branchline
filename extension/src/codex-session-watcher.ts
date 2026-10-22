@@ -28,6 +28,7 @@ import {
 import type { AgentSessionWatcher, SessionLifecycleEvent } from './session-runtime'
 import { TypedEventEmitter } from './typed-event-emitter'
 import { buildCostHistory, type CostRecord, type CostHistoryOptions } from './token-usage'
+import { codexSessionHierarchy } from './codex-session-metadata'
 
 const log = createLogger('CodexSessionWatcher')
 
@@ -134,17 +135,15 @@ function readSessionMetadata(filePath: string): SessionMetadata | null {
       const data = Buffer.concat(chunks)
       const line = data.subarray(0, end >= 0 ? end : data.length).toString('utf-8')
       const parsed = JSON.parse(line) as { type?: string; payload?: {
-        cwd?: string; agent_path?: string; agent_nickname?: string; model_provider?: string
-        source?: { subagent?: { thread_spawn?: { parent_thread_id?: string; agent_path?: string; agent_nickname?: string } } }
+        cwd?: string; model_provider?: string
       } }
       if (parsed.type !== 'session_meta') return null
       const payload = parsed.payload
-      const spawn = typeof payload?.source === 'object' ? payload.source?.subagent?.thread_spawn : undefined
-      const agentPath = payload?.agent_path ?? spawn?.agent_path
+      const hierarchy = codexSessionHierarchy(payload)
       return {
         cwd: typeof payload?.cwd === 'string' ? payload.cwd : null,
-        parentId: typeof spawn?.parent_thread_id === 'string' ? spawn.parent_thread_id : null,
-        displayName: agentPath ? path.posix.basename(agentPath) : payload?.agent_nickname ?? spawn?.agent_nickname ?? 'Subagent',
+        parentId: hierarchy.parentId ?? null,
+        displayName: hierarchy.agentName,
         provider: typeof payload?.model_provider === 'string' ? payload.model_provider : undefined,
       }
     } finally { fs.closeSync(fd) }
