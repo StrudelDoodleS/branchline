@@ -63,6 +63,9 @@ export function useVSCodeBridge(): BridgeHookResult {
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null)
   const selectedSessionIdRef = useRef<string | null>(null)
+  // A CLI file may be discovered before its review marker is appended.
+  // Undo an automatic selection when classification arrives; explicit choices stay put.
+  const autoSelectionRef = useRef<{ id: string; previous: { id: string; automatic: boolean }[] } | null>(null)
   const savedSessionsRef = useRef<Map<string, SessionInfo>>(new Map())
   const sessionEventsRef = useRef<Map<string, SimulationEvent[]>>(new Map())
   /** True while a session switch is pending (between auto-select and useLayoutEffect).
@@ -264,6 +267,7 @@ export function useVSCodeBridge(): BridgeHookResult {
         setSessions([])
         setSelectedSessionId(null)
         selectedSessionIdRef.current = null
+        autoSelectionRef.current = null
         pendingEventsRef.current.length = 0
         sessionEventsRef.current.clear()
         seenEventsRef.current.clear()
@@ -283,11 +287,12 @@ export function useVSCodeBridge(): BridgeHookResult {
       if (type === 'list') {
         const sessionList = mergeSavedSessions([...savedSessionsRef.current.values()], data as SessionInfo[])
         setSessions(sessionList)
-        // Start with the most recently used session; keep a chosen saved session.
+        // Prefer main conversations over newer auxiliary jobs; keep an explicit choice.
         // Only set selection — useLayoutEffect handles flushing events.
         if (!selectedSessionIdRef.current || !sessionList.some(session => session.id === selectedSessionIdRef.current)) {
-          const sorted = [...sessionList].sort((a, b) => b.lastActivityTime - a.lastActivityTime)
+          const sorted = [...sessionList].sort((a, b) => Number(a.kind === 'review') - Number(b.kind === 'review') || b.lastActivityTime - a.lastActivityTime)
           const autoId = sorted[0]?.id ?? null
+          autoSelectionRef.current = autoId ? { id: autoId, previous: sorted.filter(session => session.id !== autoId && session.kind !== 'review').map(session => ({ id: session.id, automatic: true })) } : null
           sessionSwitchPendingRef.current = true
           pendingEventsRef.current.length = 0
           selectedSessionIdRef.current = autoId
@@ -320,19 +325,40 @@ export function useVSCodeBridge(): BridgeHookResult {
           return
         }
         if (savedSessionsRef.current.has(selectedSessionIdRef.current ?? '')) return
+        if (session.kind === 'review' && selectedSessionIdRef.current) return
         // Auto-select newly started session.
         // Set switch-pending flag to prevent the animation frame from processing
         // events in the wrong simulation state before useLayoutEffect swaps it.
         sessionSwitchPendingRef.current = true
         pendingEventsRef.current.length = 0
+        const previousId = selectedSessionIdRef.current
+        const previousAutomatic = autoSelectionRef.current
+        autoSelectionRef.current = { id: session.id, previous: previousId
+          ? [{ id: previousId, automatic: previousAutomatic?.id === previousId }, ...(previousAutomatic?.id === previousId ? previousAutomatic.previous : [])] : [] }
         selectedSessionIdRef.current = session.id
         setSelectedSessionId(session.id)
         void requestSessionReplay(session.id)
       } else if (type === 'updated') {
-        const { sessionId, label } = data as { sessionId: string; label: string }
+        const { sessionId, label, session } = data as { sessionId: string; label: string; session?: SessionInfo }
         setSessions(prev => prev.map(s =>
-          s.id === sessionId ? { ...s, label } : s
+          s.id === sessionId ? { ...s, ...session, label } : s
         ))
+        const automatic = autoSelectionRef.current
+        if (session?.kind === 'review' && automatic) {
+          const previous = automatic.previous.filter(choice => choice.id !== sessionId || !choice.automatic)
+          autoSelectionRef.current = { ...automatic, previous }
+          if (automatic.id === sessionId && selectedSessionIdRef.current === sessionId) {
+            const [fallback, ...remaining] = previous
+            autoSelectionRef.current = fallback?.automatic ? { id: fallback.id, previous: remaining } : null
+            if (fallback) {
+              sessionSwitchPendingRef.current = true
+              pendingEventsRef.current.length = 0
+              selectedSessionIdRef.current = fallback.id
+              setSelectedSessionId(fallback.id)
+              void requestSessionReplay(fallback.id)
+            }
+          }
+        }
       } else if (type === 'ended') {
         const sessionId = data as string
         setSessions(prev => prev.map(s =>
@@ -359,6 +385,7 @@ export function useVSCodeBridge(): BridgeHookResult {
   /** Switch session selection. Does NOT flush events — call flushSessionEvents
    *  from useLayoutEffect after the simulation state has been saved/swapped. */
   const selectSession = useCallback((sessionId: string | null, saved?: SessionInfo) => {
+    autoSelectionRef.current = null
     if (saved && saved.id === sessionId) {
       savedSessionsRef.current.set(saved.id, saved)
       setSessions(previous => mergeSavedSessions([saved], previous))
@@ -400,6 +427,7 @@ export function useVSCodeBridge(): BridgeHookResult {
   const dismissedSessionsRef = useRef<Map<string, SessionInfo>>(new Map())
 
   const removeSession = useCallback((sessionId: string) => {
+    autoSelectionRef.current = null
     savedSessionsRef.current.delete(sessionId)
     setSessions(prev => {
       const session = prev.find(s => s.id === sessionId)

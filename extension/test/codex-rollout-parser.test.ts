@@ -163,6 +163,29 @@ describe('CodexRolloutParser', () => {
     )
   })
 
+  it('skips the injected review action footer and preserves literal XML user requests', () => {
+    const events: AgentEvent[] = [], labels: string[] = []
+    const parser = new CodexRolloutParser({ emit: event => events.push(event), elapsed: () => 0, setLabel: label => labels.push(label) })
+    const state = createCodexRolloutState()
+    for (const text of [
+      '<user_action>\n<context>User initiated a review task.</context>\n<action>review</action>\n<results>No findings.</results>\n</user_action>',
+      '<component>Keep this user request</component>',
+    ]) parser.processLine(JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } }), state)
+    assert.deepEqual(labels, ['<component>Keep this user request</component>'])
+    assert.deepEqual(events.filter(event => event.type === 'message').map(event => event.payload.content), ['<component>Keep this user request</component>'])
+  })
+
+  it('retains a real user request that uses the user_action tag', () => {
+    const events: AgentEvent[] = [], labels: string[] = []
+    const parser = new CodexRolloutParser({ emit: event => events.push(event), elapsed: () => 0, setLabel: label => labels.push(label) })
+    const state = createCodexRolloutState()
+    const text = '<user_action>Implement a profile menu</user_action>'
+    parser.processLine(JSON.stringify({ type: 'session_meta', payload: { source: 'cli' } }), state)
+    parser.processLine(JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } }), state)
+    assert.deepEqual(labels, [text])
+    assert.deepEqual(events.filter(event => event.type === 'message').map(event => event.payload.content), [text])
+  })
+
   it('skips messages with the developer role', () => {
     const { events } = runFixture()
     const hasDeveloper = events.some(

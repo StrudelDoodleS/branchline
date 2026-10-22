@@ -96,3 +96,20 @@ test('active counts track current work rather than how many sessions were used t
   assert.deepEqual(after.find(group => group.id === 'active')?.sessions.map(s => s.id), ['codex'])
   assert.equal(after.find(group => group.id === 'recent')?.sessions.length, 17)
 })
+
+test('CLI review jobs stay separate from main conversations across live and saved history', () => {
+  const now = Date.now()
+  const sessions = [session('main', now - 1000, { status: 'active', runtime: 'claude' }),
+    session('review-live', now, { status: 'active', runtime: 'codex', kind: 'review' }),
+    session('review-recent', now - 2000, { historical: true, runtime: 'codex', kind: 'review' }),
+    session('review-old', now - 3 * 86400000, { historical: true, runtime: 'codex', kind: 'review' }),
+    session('pasted-main', now - 3000, { label: '<pasted_content>My actual request</pasted_content>', historical: true })]
+  const groups = Browser.groupSessionsByActivity(sessions, now)
+  assert.deepEqual(groups.map(group => [group.id, group.sessions.map(s => s.id)]), [
+    ['active', ['main']], ['recent', ['pasted-main']], ['review-jobs', ['review-live', 'review-recent', 'review-old']],
+  ])
+  const filtered = Browser.browseSessions(sessions, { provider: 'openai', search: 'review' }, now)
+  assert.deepEqual(Browser.groupSessionsByActivity(filtered, now).map(group => [group.id, group.sessions.map(s => s.id)]), [
+    ['active', []], ['recent', []], ['review-jobs', ['review-live', 'review-recent', 'review-old']],
+  ])
+})

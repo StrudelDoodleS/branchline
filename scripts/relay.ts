@@ -110,7 +110,7 @@ function broadcastSessionLifecycle(type: 'started' | 'ended' | 'updated', sessio
   } else if (type === 'ended') {
     broadcast(JSON.stringify({ type: 'session-ended', sessionId }))
   } else if (type === 'updated') {
-    broadcast(JSON.stringify({ type: 'session-updated', sessionId, label }))
+    broadcast(JSON.stringify({ type: 'session-updated', sessionId, label, session: details }))
   }
 }
 
@@ -446,7 +446,7 @@ export async function createRelay(options: RelayOptions): Promise<Relay> {
     codexWatcher = new CodexSessionWatcher(workspace)
     codexWatcher.onEvent((event) => broadcastEvent(event))
     codexWatcher.onSessionLifecycle((lifecycle) => {
-      const details = lifecycle.type === 'started' ? codexWatcher?.getActiveSessions().find(session => session.id === lifecycle.sessionId) : undefined
+      const details = lifecycle.type !== 'ended' ? codexWatcher?.getActiveSessions().find(session => session.id === lifecycle.sessionId) : undefined
       broadcastSessionLifecycle(lifecycle.type, lifecycle.sessionId, lifecycle.label, 'codex', details)
     })
     codexWatcher.start()

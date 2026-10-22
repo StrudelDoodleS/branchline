@@ -104,10 +104,12 @@ export function wireWatcherToPanel(
           status: 'active',
           startTime: Date.now(),
           lastActivityTime: Date.now(),
+          ...watcher.getActiveSessions().find(session => session.id === lifecycle.sessionId),
         },
       })
     } else if (lifecycle.type === 'updated') {
-      panel.postMessage({ type: 'session-updated', sessionId: lifecycle.sessionId, label: lifecycle.label })
+      panel.postMessage({ type: 'session-updated', sessionId: lifecycle.sessionId, label: lifecycle.label,
+        session: watcher.getActiveSessions().find(session => session.id === lifecycle.sessionId) })
     } else {
       panel.postMessage({ type: 'session-ended', sessionId: lifecycle.sessionId })
     }

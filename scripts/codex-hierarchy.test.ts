@@ -15,11 +15,12 @@ function reviewFixture(context: TestContext) {
   const day = new Date().toISOString().slice(0, 10)
   const folder = path.join(directory, 'sessions', ...day.split('-'))
   fs.mkdirSync(folder, { recursive: true })
-  const write = (id: string, second: number, metadata: object) => {
+  const write = (id: string, second: number, metadata: object, header: object[] = []) => {
     const file = path.join(folder, `rollout-${day}T00-00-${String(second).padStart(2, '0')}-${id}.jsonl`)
     const usage = { input_tokens: 1000, cached_input_tokens: 900, output_tokens: 10 }
     fs.writeFileSync(file, [
       { type: 'session_meta', payload: { id, cwd: directory, originator: 'codex_exec', ...metadata } },
+      ...header,
       { type: 'turn_context', payload: { model: 'gpt-6.1-sol' } },
       { type: 'token_usage_record', timestamp: new Date().toISOString(), payload: { response_id: id, usage, thread_token_usage: usage } },
     ].map(record => JSON.stringify(record)).join('\n') + '\n')
@@ -32,8 +33,85 @@ function reviewFixture(context: TestContext) {
     else process.env.CODEX_HOME = previous
     fs.rmSync(directory, { recursive: true, force: true })
   })
-  return { watcher, write }
+  return { watcher, write, directory }
 }
+
+const enteredReview = { type: 'event_msg', payload: { type: 'item_completed', item: {
+  type: 'EnteredReviewMode', id: 'review-start', target: { type: 'uncommittedChanges' }, user_facing_hint: 'Review current changes',
+} } }
+const reviewAction = '<user_action>\n<context>User initiated a review task.</context>\n<action>review</action>\n<results>No findings.</results>\n</user_action>'
+const userMessage = (text: string) => ({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } })
+
+test('classifies an exec review launcher before first discovery and preserves its native child costs', context => {
+  const { watcher, write, directory } = reviewFixture(context)
+  const main = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa'
+  const review = 'bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb'
+  const child = 'cccccccc-cccc-4ccc-cccc-cccccccccccc'
+  write(main, 0, { source: 'cli' }, [userMessage('Implement the feature')])
+  write(review, 1, { source: 'exec', base_instructions: { text: 'x'.repeat(200000) } }, [
+    enteredReview, { type: 'event_msg', payload: { type: 'task_started' } }, userMessage(reviewAction),
+  ])
+  write(child, 2, { source: { subagent: 'review' }, parent_thread_id: review })
+  const detected: string[] = []
+  const initial: Array<[string, string | undefined, string]> = []
+  const firstEventKinds: Array<string | undefined> = []
+  watcher.onSessionDetected(id => detected.push(id))
+  watcher.onEvent(event => {
+    if (event.sessionId === review && firstEventKinds.length === 0) firstEventKinds.push(watcher.getActiveSessions().find(session => session.id === review)?.kind)
+  })
+  watcher.onSessionLifecycle(event => {
+    if (event.type !== 'started') return
+    const session = watcher.getActiveSessions().find(session => session.id === event.sessionId)!
+    initial.push([session.id, session.kind, session.label])
+  })
+  watcher.start()
+
+  assert.deepEqual(detected.sort(), [main, review])
+  assert.deepEqual(firstEventKinds, ['review'])
+  assert.deepEqual(initial.sort(), [[main, undefined, 'Implement the feature'], [review, 'review', `Review · ${path.basename(directory)}`]])
+  const sessions = watcher.getActiveSessions()
+  assert.equal(sessions.find(session => session.id === review)?.label, `Review · ${path.basename(directory)}`)
+  assert.equal(sessions.find(session => session.id === main)?.kind, undefined)
+  assert.deepEqual(watcher.getCostHistory(review)!.cacheReuse!.agents.map(agent => [agent.agentId, agent.agentName]).sort(), [
+    [review, 'Main session'], [child, 'Review'],
+  ])
+  assert.ok(Math.abs(watcher.getCostHistory(review)!.totalCostUSD! - 0.00078) < 1e-12)
+  assert.ok(Math.abs(watcher.getCostHistory(main)!.totalCostUSD! - 0.00039) < 1e-12)
+})
+
+test('updates an exec job discovered before its review marker is appended', async context => {
+  const { watcher, write, directory } = reviewFixture(context)
+  const review = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa'
+  const file = write(review, 0, { source: 'exec' })
+  fs.writeFileSync(file, JSON.stringify({ type: 'session_meta', payload: { id: review, cwd: directory, source: 'exec', originator: 'codex_exec' } }) + '\n')
+  const updated: Array<[string | undefined, string]> = []
+  watcher.onSessionLifecycle(event => {
+    if (event.type === 'updated') {
+      const session = watcher.getActiveSessions().find(session => session.id === review)!
+      updated.push([session.kind, session.label])
+    }
+  })
+  watcher.start()
+  assert.equal(watcher.getActiveSessions()[0].kind, undefined)
+  fs.appendFileSync(file, [enteredReview, userMessage(reviewAction), enteredReview].map(record => JSON.stringify(record)).join('\n') + '\n')
+  for (let attempt = 0; attempt < 100 && !updated.length; attempt++) await new Promise<void>(resolve => setImmediate(resolve))
+  assert.deepEqual(updated, [['review', `Review · ${path.basename(directory)}`]])
+  assert.equal(watcher.getActiveSessions()[0].kind, 'review')
+})
+
+test('keeps interactive review sessions and ordinary exec launches as regular sessions', context => {
+  const { watcher, write } = reviewFixture(context)
+  const cli = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa'
+  const vscode = 'bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb'
+  const exec = 'cccccccc-cccc-4ccc-cccc-cccccccccccc'
+  write(cli, 0, { source: 'cli' }, [enteredReview, userMessage('A CLI conversation')])
+  write(vscode, 1, { source: 'vscode' }, [enteredReview, userMessage('An IDE conversation')])
+  write(exec, 2, { source: 'exec' }, [userMessage(reviewAction), userMessage('<component>Keep this user request</component>')])
+  watcher.start()
+  assert.deepEqual(watcher.getActiveSessions().map(session => [session.id, session.kind, session.label]).sort(), [
+    [cli, undefined, 'A CLI conversation'], [vscode, undefined, 'An IDE conversation'], [exec, undefined, '<component>Keep this user request</component>'],
+  ])
+})
 
 for (const childFirst of [false, true]) {
   test(`groups a Codex review child discovered ${childFirst ? 'before' : 'after'} its parent and ends only the root`, async context => {

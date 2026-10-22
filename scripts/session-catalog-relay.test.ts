@@ -21,10 +21,10 @@ test('relay retains archived child charges and broadcasts the real provider and 
   const current = path.join(directory, 'sessions', ...day.split('-'))
   const archived = path.join(directory, 'archived_sessions')
   fs.mkdirSync(current, { recursive: true }); fs.mkdirSync(archived)
-  const write = (folder: string, id: string, input: number, parent?: string, provider = 'openai') => {
+  const write = (folder: string, id: string, input: number, parent?: string, provider = 'openai', rootSource = 'cli') => {
     const file = path.join(folder, `rollout-${day}T00-00-00-${id}.jsonl`)
     const usage = { input_tokens: input, cached_input_tokens: input * 0.9, output_tokens: input / 100 }
-    const source = parent ? { subagent: { thread_spawn: { parent_thread_id: parent, agent_nickname: 'Saved reviewer' } } } : 'cli'
+    const source = parent ? { subagent: { thread_spawn: { parent_thread_id: parent, agent_nickname: 'Saved reviewer' } } } : rootSource
     const records = [{ type: 'session_meta', payload: { id, cwd: directory, model_provider: provider, source } },
       { type: 'turn_context', payload: { model: 'gpt-6.1-sol' } },
       { type: 'event_msg', timestamp: new Date(at).toISOString(), payload: { type: 'token_count', info: { total_token_usage: usage, last_token_usage: usage } } }]
@@ -75,7 +75,7 @@ test('relay retains archived child charges and broadcasts the real provider and 
     assert.equal(overview.sessions[0].indexed, true)
     const stream = await fetch(origin + '/events', { signal: abort.signal })
     const reader = stream.body!.getReader()
-    const file = write(current, later, 1000, undefined, 'custom-vendor')
+    const file = write(current, later, 1000, undefined, 'custom-vendor', 'exec')
     const mtime = fs.statSync(file).mtimeMs
     let pending = '', found: Record<string, unknown> | undefined
     while (!found) {
@@ -94,6 +94,30 @@ test('relay retains archived child charges and broadcasts the real provider and 
     assert.equal(found.provider, 'custom-vendor')
     assert.equal(found.runtime, 'codex')
     assert.equal(found.lastActivityTime, mtime)
+    assert.equal(found.kind, undefined)
+    // Discovery may precede the second record. The live transport must carry
+    // classification, rather than leave clients with just a new title.
+    fs.appendFileSync(file, JSON.stringify({ type: 'event_msg', payload: { type: 'item_completed',
+      item: { type: 'EnteredReviewMode', user_facing_hint: 'Review this branch' } } }) + '\n')
+    let update: Record<string, unknown> | undefined
+    while (!update) {
+      const { value, done } = await reader.read()
+      if (done) break
+      pending += new TextDecoder().decode(value)
+      let end: number
+      while ((end = pending.indexOf('\n\n')) >= 0) {
+        const packet = pending.slice(0, end); pending = pending.slice(end + 2)
+        if (!packet.startsWith('data: ')) continue
+        const data = JSON.parse(packet.slice(6))
+        if (data.type === 'session-updated' && data.sessionId === later) update = data
+      }
+    }
+    assert.ok(update)
+    const details = update.session as Record<string, unknown> | undefined
+    assert.equal(details?.kind, 'review')
+    assert.equal(details?.provider, 'custom-vendor')
+    assert.equal(details?.id, later)
+    assert.equal(details?.label, update.label)
   } finally {
     abort.abort()
     relay?.dispose()

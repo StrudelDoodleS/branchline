@@ -152,6 +152,99 @@ async def session_picker_live_focus(page):
     await expect(session_picker(page)).to_be_focused()
 
 
+async def session_review_jobs(page):
+    await page.evaluate('window.__phoneEventSources.forEach(source=>source.close())')
+    now = await page.evaluate('Date.now()')
+    saved = [dict(id='review-recent', label='Review · nb2-poisson-limit', kind='review', runtime='codex', provider='openai', historical=True,
+                  status='completed', startTime=now-10000, lastActivityTime=now-1000),
+             dict(id='review-old', label='Review · browser-flakes', kind='review', runtime='codex', provider='openai', historical=True,
+                  status='completed', startTime=now-3*86400000, lastActivityTime=now-3*86400000)]
+    await page.route('**/session-catalog*', lambda route: route.fulfill(status=200, content_type='application/json', body=json.dumps(dict(sessions=saved))))
+    await session_picker(page).click()
+    panel = page.get_by_role('dialog', name='Sessions', exact=True)
+    await expect(panel.get_by_label('Session matches', exact=True)).to_contain_text('2 sessions · 3 review jobs')
+    active = panel.locator('[data-session-group="active"]')
+    recent = panel.locator('[data-session-group="recent"]')
+    jobs = panel.locator('[data-session-group="review-jobs"]')
+    await expect(active.locator('[data-session-group-count]')).to_have_text('2')
+    await expect(recent.locator('[data-session-group-count]')).to_have_text('0')
+    await expect(jobs.locator('[data-session-group-toggle]')).to_contain_text('Review jobs')
+    await expect(jobs.locator('[data-session-group-toggle]')).to_have_attribute('aria-expanded', 'false')
+    await expect(jobs.locator('[data-session-choice]')).to_have_count(3)
+    await expect(jobs.locator('[data-session-choice="phone-review"]')).to_be_hidden()
+    await jobs.locator('[data-session-group-toggle]').click()
+    await expect(jobs.locator('[data-session-choice="phone-review"]')).to_be_visible()
+    await expect(jobs.locator('[data-session-choice="review-old"]')).to_contain_text('Review · browser-flakes')
+    await panel.get_by_role('searchbox', name='Search sessions', exact=True).fill('nb2-poisson')
+    await expect(panel.get_by_label('Session matches', exact=True)).to_contain_text('0 sessions · 1 review job')
+    await expect(jobs.locator('[data-session-choice="review-recent"]')).to_be_visible()
+    await panel.get_by_role('button', name='Anthropic', exact=True).click()
+    await expect(panel.get_by_text('No sessions match your search.', exact=True)).to_be_visible()
+    await panel.get_by_role('button', name='Clear filters', exact=True).click()
+    await panel.get_by_role('button', name='Close sessions', exact=True).click()
+    # A new review job must not switch away from the main conversation.
+    later = dict(id='review-later', label='Review · new-work', kind='review', runtime='codex', provider='openai',
+                 status='active', startTime=now+2000, lastActivityTime=now+2000)
+    await page.evaluate("session=>window.postMessage({type:'session-started',session},'*')", later)
+    await expect(session_picker(page)).to_have_attribute('data-session-id', 'phone-primary')
+    await choose_session(page, 'phone-review')
+    await expect(session_picker(page)).to_have_attribute('data-session-id', 'phone-review')
+    await expect(session_picker(page)).to_contain_text('Review job')
+    await expect(page.get_by_role('button', name='Monitor main session', exact=True)).to_be_visible()
+    assert await page.evaluate('document.documentElement.scrollWidth<=innerWidth')
+
+
+async def session_review_late_metadata(page):
+    await page.evaluate('window.__phoneEventSources.forEach(source=>source.close())')
+    await page.route('**/session-catalog*', lambda route: route.fulfill(status=200, content_type='application/json', body='{"sessions":[]}'))
+    now = await page.evaluate('Date.now()')
+    pending = dict(id='phone-other', label='Codex pending', status='active', startTime=now, lastActivityTime=now, runtime='codex', provider='openai')
+    await page.evaluate("session=>window.postMessage({type:'session-started',session},'*')", pending)
+    await expect(session_picker(page)).to_have_attribute('data-session-id', 'phone-other')
+    await session_picker(page).click()
+    panel = page.get_by_role('dialog', name='Sessions', exact=True)
+    await panel.locator('[data-session-group="active"] [data-session-group-toggle]').click()
+    choice = panel.locator('[data-session-choice="phone-other"]')
+    await choice.focus()
+    review = dict(pending, kind='review', label='Review · late-marker')
+    await page.evaluate("session=>window.postMessage({type:'session-updated',sessionId:session.id,label:session.label,session},'*')", review)
+    await expect(choice.locator('xpath=ancestor::li[@data-session-group]')).to_have_attribute('data-session-group', 'review-jobs')
+    await expect(choice).to_be_focused()
+    await expect(choice).to_be_visible()
+    await expect(session_picker(page)).to_have_attribute('data-session-id', 'phone-primary')
+    await expect(panel.locator('[data-session-group="active"] [data-session-group-count]')).to_have_text('1')
+    await page.keyboard.press('Escape')
+    # Explicitly choosing that job survives later metadata updates.
+    await choose_session(page, 'phone-other')
+    await page.evaluate("session=>window.postMessage({type:'session-updated',sessionId:session.id,label:session.label,session},'*')", review)
+    await expect(session_picker(page)).to_have_attribute('data-session-id', 'phone-other')
+    await expect(session_picker(page)).to_contain_text('Review job')
+
+
+async def session_review_overlapping_metadata(page):
+    await page.evaluate('window.__phoneEventSources.forEach(source=>source.close())')
+    await page.route('**/session-catalog*', lambda route: route.fulfill(status=200, content_type='application/json', body='{"sessions":[]}'))
+    async def replay(route):
+        session_id = parse_qs(urlparse(route.request.url).query)['sessionId'][0]
+        if not session_id.startswith('pending-review-'):
+            await route.fallback()
+            return
+        await route.fulfill(status=200, content_type='application/json', body=json.dumps(dict(streamId='pending-reviews', throughEventId=0, events=[])))
+    await page.route('**/session-events?*', replay)
+    for index, order in enumerate([[0, 1], [1, 0]]):
+        await choose_session(page, 'phone-primary')
+        now = await page.evaluate('Date.now()')
+        pending = [dict(id=f'pending-review-{index}-{i}', label='Codex pending', status='active', startTime=now+i, lastActivityTime=now+i,
+                        runtime='codex', provider='openai') for i in range(2)]
+        for session in pending:
+            await page.evaluate("session=>window.postMessage({type:'session-started',session},'*')", session)
+        await expect(session_picker(page)).to_have_attribute('data-session-id', pending[1]['id'])
+        for i in order:
+            review = dict(pending[i], kind='review', label=f'Review · task-{i}')
+            await page.evaluate("session=>window.postMessage({type:'session-updated',sessionId:session.id,label:session.label,session},'*')", review)
+        await expect(session_picker(page)).to_have_attribute('data-session-id', 'phone-primary')
+
+
 async def session_history_browser(page):
     await page.evaluate('window.__phoneEventSources.forEach(source=>source.close())')
     now = await page.evaluate('Date.now()')
@@ -1672,7 +1765,7 @@ async def main():
             launch["executable_path"] = os.environ["PLAYWRIGHT_CHROMIUM_EXECUTABLE"]
         browser = await playwright.chromium.launch(**launch)
         for width in [360, 390, 1280]:
-            for check in [session_picker_accordion,session_picker_live_focus,session_history_browser, session_catalog_retry, tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, main_reply_preserves_subagents, agent_status_filters, cost_history_graph, cost_history_retry, cost_burn_breakdown, cost_burn_trends, cost_multi_day_comparison, cost_readable_layout, agent_model_settings, cost_model_analytics, cost_cache_reuse, cost_cache_write_unknown, cost_time_views, cost_phone_gestures, cost_history_pending_queries]:
+            for check in [session_picker_accordion,session_picker_live_focus,session_review_jobs,session_review_late_metadata,session_review_overlapping_metadata,session_history_browser, session_catalog_retry, tree_hierarchy, agent_navigation, portrait_controls, header_contrast, graph_panels, tree_keyboard, activity_reading, same_session_live, cold_session_history, live_during_history_fetch, delayed_replay_cannot_regress_state, failed_history_can_retry, reconnect_refreshes_selected_history, reset_same_session_keeps_live_updates, new_stream_live_during_reconnect, context_bars_fit_portrait, reported_usage_costs, main_reply_preserves_subagents, agent_status_filters, cost_history_graph, cost_history_retry, cost_burn_breakdown, cost_burn_trends, cost_multi_day_comparison, cost_readable_layout, agent_model_settings, cost_model_analytics, cost_cache_reuse, cost_cache_write_unknown, cost_time_views, cost_phone_gestures, cost_history_pending_queries]:
                 if requested and check.__name__ not in requested:
                     continue
                 context = await browser.new_context(viewport=dict(width=width, height=844), is_mobile=width < 640, has_touch=width < 640)
@@ -1697,7 +1790,7 @@ async def main():
                         }
                         return originalStroke.call(this,x,y,width,height);
                       };""")
-                if check in [session_picker_live_focus,session_history_browser, reconnect_refreshes_selected_history, new_stream_live_during_reconnect]:
+                if check in [session_picker_live_focus,session_review_jobs,session_review_late_metadata,session_review_overlapping_metadata,session_history_browser, reconnect_refreshes_selected_history, new_stream_live_during_reconnect]:
                     await page.add_init_script("""window.__phoneEventSources = [];
                       const NativeEventSource = window.EventSource;
                       window.EventSource = class extends NativeEventSource {
@@ -1707,6 +1800,16 @@ async def main():
                 errors = []
                 page.on("pageerror", lambda error: errors.append(str(error)))
                 body = recording()
+                if check is session_review_jobs:
+                    packets = [json.loads(line[6:]) for line in body.splitlines() if line.startswith('data: ')]
+                    for session, runtime, provider in zip(packets[0]['sessions'], ['claude','codex'], ['anthropic','openai']):
+                        session.update(runtime=runtime, provider=provider)
+                    now = int(time.time()*1000)
+                    packets[0]['sessions'].insert(0, dict(id='phone-review', label='Review · polars-2', kind='review', runtime='codex', provider='openai',
+                        status='active', startTime=now+1000, lastActivityTime=now+1000))
+                    packets[1]['events'].append(dict(type='agent_spawn', payload=dict(name='Orchestrator', isMain=True, runtime='codex'),
+                        time=0, sessionId='phone-review', streamId='phone-fixture', eventId=100))
+                    body = ''.join('data: '+json.dumps(packet)+'\n\n' for packet in packets)
                 if check is cold_session_history:
                     packets = [json.loads(line[6:]) for line in body.splitlines() if line.startswith('data: ')]
                     packets[1]['events'] = [event for event in packets[1]['events'] if event['sessionId'] == 'phone-primary']
@@ -1716,6 +1819,9 @@ async def main():
                     session_id = parse_qs(urlparse(route.request.url).query)['sessionId'][0]
                     packets = [json.loads(line[6:]) for line in recording().splitlines() if line.startswith('data: ')]
                     events = [event for event in packets[1]['events'] if event['sessionId'] == session_id]
+                    if session_id == 'phone-review':
+                        events = [dict(type='agent_spawn', payload=dict(name='Orchestrator', isMain=True, runtime='codex'),
+                            time=0, sessionId=session_id, streamId='phone-fixture', eventId=100)]
                     await route.fulfill(status=200, content_type='application/json', body=json.dumps(dict(streamId='phone-fixture', throughEventId=max(event['eventId'] for event in events), events=events)))
                 await page.route('**/session-events?*', replay_route)
                 try:

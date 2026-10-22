@@ -27,6 +27,7 @@ export interface SessionInfo {
   provider?: string
   historical?: boolean
   project?: string
+  kind?: 'review'
 }
 
 export type ConnectionStatus = 'connected' | 'disconnected' | 'watching'

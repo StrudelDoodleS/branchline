@@ -24,7 +24,7 @@ export function SessionTabs(props: SessionTabsProps) {
       <button ref={triggerRef} type="button" aria-label="Browse sessions" aria-describedby={titleId} aria-haspopup="dialog" aria-expanded={open}
         data-session-id={props.selectedSessionId ?? ''} onClick={() => setOpen(true)}
         className="flex min-h-11 min-w-0 flex-1 items-center justify-between gap-3 rounded-lg border border-slate-500 bg-slate-800 px-3 py-2 text-left text-slate-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300">
-        <span className="min-w-0"><span className="block text-[11px] text-slate-300">Main session</span>
+        <span className="min-w-0"><span className="block text-[11px] text-slate-300">{current?.kind === 'review' ? 'Review job' : 'Main session'}</span>
           <span id={titleId} className="block truncate text-sm font-semibold">{current?.label ?? 'Choose a session'}</span></span>
         <span aria-hidden="true" className="text-lg text-slate-300">⌄</span>
       </button>

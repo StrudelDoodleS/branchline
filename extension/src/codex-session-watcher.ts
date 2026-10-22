@@ -28,7 +28,7 @@ import {
 import type { AgentSessionWatcher, SessionLifecycleEvent } from './session-runtime'
 import { TypedEventEmitter } from './typed-event-emitter'
 import { buildCostHistory, type CostRecord, type CostHistoryOptions } from './token-usage'
-import { codexSessionHierarchy } from './codex-session-metadata'
+import { codexReviewLabel, codexSessionHierarchy, isCodexExecReview } from './codex-session-metadata'
 
 const log = createLogger('CodexSessionWatcher')
 
@@ -60,6 +60,7 @@ interface WatchedCodexSession {
   parentId: string | null
   displayName: string
   provider?: string
+  kind?: 'review'
 }
 
 interface SessionMetadata {
@@ -67,6 +68,7 @@ interface SessionMetadata {
   parentId: string | null
   displayName: string
   provider?: string
+  kind?: 'review'
 }
 
 function codexHome(): string {
@@ -100,7 +102,7 @@ function recentSessionDirs(now: Date): string[] {
   return Array.from(seen)
 }
 
-/** Read the first line of a rollout file to extract cwd from session_meta.
+/** Read session_meta and a bounded header to identify exec review jobs.
  *
  *  UTF-8 safety: `\n` is 0x0a, which never appears as a continuation byte in
  *  a multi-byte UTF-8 sequence (continuation bytes are 0x80–0xBF), so slicing
@@ -110,7 +112,8 @@ function recentSessionDirs(now: Date): string[] {
  *  newer Codex versions embed in full, including AGENTS.md content) can push
  *  it far larger — keep reading in chunks until the first newline, up to a
  *  1MB cap. Past the cap we give up: JSON.parse fails on the truncated object
- *  and we return null rather than emit a corrupted cwd. */
+ *  and we return null rather than emit a corrupted cwd. Exec review markers
+ *  get at most another 64KB after that first line. */
 function readSessionMetadata(filePath: string): SessionMetadata | null {
   const CHUNK_SIZE = 65536
   const MAX_FIRST_LINE = 1048576
@@ -135,16 +138,27 @@ function readSessionMetadata(filePath: string): SessionMetadata | null {
       const data = Buffer.concat(chunks)
       const line = data.subarray(0, end >= 0 ? end : data.length).toString('utf-8')
       const parsed = JSON.parse(line) as { type?: string; payload?: {
-        cwd?: string; model_provider?: string
+        cwd?: string; model_provider?: string; source?: unknown
       } }
       if (parsed.type !== 'session_meta') return null
       const payload = parsed.payload
       const hierarchy = codexSessionHierarchy(payload)
+      let kind: 'review' | undefined
+      if (payload?.source === 'exec' && end >= 0) {
+        const header = Buffer.alloc(CHUNK_SIZE)
+        const read = fs.readSync(fd, header, 0, header.length, end + 1)
+        for (const line of header.subarray(0, read).toString('utf8').split('\n')) {
+          try {
+            if (isCodexExecReview(payload, JSON.parse(line))) { kind = 'review'; break }
+          } catch { /* Ignore incomplete or corrupt header records. */ }
+        }
+      }
       return {
         cwd: typeof payload?.cwd === 'string' ? payload.cwd : null,
         parentId: hierarchy.parentId ?? null,
         displayName: hierarchy.agentName,
         provider: typeof payload?.model_provider === 'string' ? payload.model_provider : undefined,
+        kind,
       }
     } finally { fs.closeSync(fd) }
   } catch { return null }
@@ -196,6 +210,7 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
       startTime: s.sessionStartTime,
       lastActivityTime: Math.max(...Array.from(this.sessions.values()).filter(member => this.rootSession(member.sessionId)?.sessionId === s.sessionId).map(member => member.lastActivityTime)),
       runtime: 'codex', provider: s.provider ?? 'openai',
+      ...(s.kind ? { kind: s.kind } : {}),
     }))
   }
 
@@ -470,7 +485,7 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
     }
     const existingRoot = parentId ? this.rootSession(parentId) : undefined
     const groupWasActive = existingRoot ? this.groupIsActive(existingRoot.sessionId) : false
-    const label = `Codex ${sessionId.slice(0, SESSION_ID_DISPLAY)}`
+    const label = metadata?.kind === 'review' ? codexReviewLabel(metadata.cwd) : `Codex ${sessionId.slice(0, SESSION_ID_DISPLAY)}`
 
     // Build the parser once per session so the delegate closures capture the
     // right session reference and re-emission is stateless on this side.
@@ -485,6 +500,13 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
         if (!s || !s.label.startsWith('Codex ')) return // only replace auto-label
         s.label = newLabel
         if (!s.parentId) this._onSessionLifecycle.fire({ type: 'updated', sessionId, label: newLabel })
+      },
+      setReview: (newLabel) => {
+        const s = this.sessions.get(sessionId)
+        if (!s || s.kind === 'review') return
+        s.kind = 'review'
+        s.label = newLabel
+        if (!s.parentId && s.sessionDetected) this._onSessionLifecycle.fire({ type: 'updated', sessionId, label: newLabel })
       },
     })
 
@@ -506,6 +528,7 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
       parentId,
       displayName: metadata?.displayName ?? 'Subagent',
       provider: metadata?.provider,
+      kind: metadata?.kind,
     }
     this.sessions.set(sessionId, session)
     if (!restoring) this.reviveInactiveAncestors(session)

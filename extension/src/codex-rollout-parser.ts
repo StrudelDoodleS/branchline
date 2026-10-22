@@ -44,6 +44,7 @@ import {
 import { estimateTokenCost, estimateTokensFromText } from './token-estimator'
 import { createLogger } from './logger'
 import { CodexUsageTracker } from './token-usage'
+import { codexReviewLabel, isCodexExecReview, isCodexReviewAction } from './codex-session-metadata'
 
 const log = createLogger('CodexRolloutParser')
 
@@ -71,6 +72,8 @@ export interface CodexRolloutState {
   reasoningEffort: string | null
   /** Cwd from session_meta, updated by turn_context. */
   cwd: string | null
+  source: string | null
+  reviewEntered: boolean
   /** Label for the session (set from first non-system user message). */
   label: string | null
   /** Pending tool calls, keyed by call_id. */
@@ -95,6 +98,8 @@ export function createCodexRolloutState(): CodexRolloutState {
     model: null,
     reasoningEffort: null,
     cwd: null,
+    source: null,
+    reviewEntered: false,
     label: null,
     pendingToolCalls: new Map(),
     seenMessageHashes: new Set(),
@@ -121,6 +126,8 @@ export interface CodexParserDelegate {
   elapsed(): number
   /** Called when a session label is derived from the first user message. */
   setLabel?(label: string): void
+  /** A noninteractive exec launch entered review mode, possibly after discovery. */
+  setReview?(label: string): void
 }
 
 // ─── Record shapes (structural typing, all fields optional) ────────────────
@@ -171,6 +178,7 @@ interface WebSearchCallPayload {
 interface SessionMetaPayload {
   id?: string
   cwd?: string
+  source?: unknown
   cli_version?: string
   base_instructions?: { text?: string }
 }
@@ -228,6 +236,7 @@ function extractCodexUserText(raw: string): string | null {
   if (!text) return null
   if (SYSTEM_CONTENT_PREFIXES.some(p => text.startsWith(p))) return null
   if (CODEX_PURE_INJECTION_PREFIXES.some(p => text.startsWith(p))) return null
+  if (isCodexReviewAction(text)) return null
   if (text.startsWith('# Context from my IDE setup:')) {
     const idx = text.indexOf(CODEX_REQUEST_MARKER)
     if (idx < 0) return null // IDE context with no request — skip
@@ -320,6 +329,7 @@ export class CodexRolloutParser {
   private handleSessionMeta(payload: SessionMetaPayload | undefined, state: CodexRolloutState): void {
     if (!payload) return
     if (typeof payload.cwd === 'string') state.cwd = payload.cwd
+    state.source = typeof payload.source === 'string' ? payload.source : null
     // Estimate system-prompt tokens from base_instructions if present
     const sys = payload.base_instructions?.text
     if (typeof sys === 'string' && sys.length > 0) {
@@ -529,6 +539,11 @@ export class CodexRolloutParser {
 
   private handleEventMsg(payload: unknown, state: CodexRolloutState, timestamp?: number): void {
     if (!isRecord(payload)) return
+    if (!state.reviewEntered && isCodexExecReview({ source: state.source }, { type: 'event_msg', payload })) {
+      state.reviewEntered = true
+      state.label = codexReviewLabel(state.cwd)
+      this.delegate.setReview?.(state.label)
+    }
     switch (payload.type) {
       case 'agent_reasoning':
         return this.handleAgentReasoning(payload, state)

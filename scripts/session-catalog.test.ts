@@ -39,6 +39,104 @@ async function fixture(t: TestContext) {
   return { directory, options, write, codex, claude }
 }
 
+const enteredReview = { type: 'event_msg', timestamp: stamp(0), payload: { type: 'item_completed', item: {
+  type: 'EnteredReviewMode', id: 'review-start', target: { type: 'uncommittedChanges' }, user_facing_hint: 'Review current changes',
+} } }
+const reviewAction = '<user_action>\n<context>User initiated a review task.</context>\n<action>review</action>\n<results>No findings.</results>\n</user_action>'
+
+test('preserves ordinary user_action prompts and saved titles while rejecting truncated review envelopes', async t => {
+  const f = await fixture(t)
+  const text = '<user_action>Implement a profile menu</user_action>'
+  await f.codex(rootId, undefined, [{ type: 'response_item', payload: { type: 'message', role: 'user', content: text } }])
+  await f.codex(otherId, undefined, [enteredReview, context], false, { source: 'exec' })
+  await f.write(path.join(path.dirname(f.options.codexDir), 'session_index.jsonl'), [
+    { id: rootId, thread_name: text },
+    { id: otherId, thread_name: "<user_action> <context>User initiated a review task. Here's the full review output from reviewer model. User may select one or more comments to resolve.</context> <action>review</a" },
+  ])
+  const sessions = await new SessionCatalog(f.options).list()
+  assert.equal(sessions.find(session => session.id === rootId)?.label, text)
+  assert.equal(sessions.find(session => session.id === otherId)?.label, 'Review · saved-project')
+})
+
+test('labels an exec review job from a large header and keeps it independent with native reviewer costs', async t => {
+  const f = await fixture(t)
+  await f.codex(rootId, undefined, [enteredReview,
+    { type: 'event_msg', timestamp: stamp(1), payload: { type: 'task_started' } },
+    context, response('review-launcher', 2),
+    { type: 'response_item', timestamp: stamp(3), payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: reviewAction }] } },
+  ], false, { source: 'exec', originator: 'codex_exec', base_instructions: { text: 'x'.repeat(200000) } })
+  await f.codex(childId, undefined, [context, response('review-child', 4)], false,
+    { source: { subagent: 'review' }, parent_thread_id: rootId })
+  await f.codex(otherId, undefined, [context, response('interactive', 5)])
+  const titleFile = path.join(path.dirname(f.options.codexDir), 'session_index.jsonl')
+  await f.write(titleFile, [{ id: rootId, thread_name: reviewAction }, { id: otherId, thread_name: 'Interactive task' }])
+  const catalog = new SessionCatalog(f.options)
+  const sessions = await catalog.list()
+  assert.deepEqual(sessions.map(session => [session.id, session.kind, session.label]).sort(), [
+    [rootId, 'review', 'Review · saved-project'], [otherId, undefined, 'Interactive task'],
+  ])
+  const [snapshot] = (await catalog.snapshots()).filter(snapshot => snapshot.session.id === rootId)
+  const records = await catalog.recordsForSnapshot(snapshot)
+  assert.equal(snapshot.agentCount, 2)
+  assert.deepEqual(records.map(record => [record.agentId, record.agentName]).sort(), [[rootId, 'Main session'], [childId, 'Review']])
+  assert.ok(Math.abs(records.reduce((sum, record) => sum + record.costUSD!, 0) - 0.0296) < 1e-12)
+  assert.equal((await catalog.records(otherId))?.length, 1)
+
+  const cachePath = path.join(f.directory, 'review-spend-index.json')
+  const index = new SpendIndex(catalog, { cachePath })
+  await index.overview()
+  await index.whenIdle()
+  const persisted = JSON.parse(await fs.readFile(cachePath, 'utf8'))
+  const cachedReview = persisted.entries.find((entry: { session: { id: string } }) => entry.session.id === rootId)
+  delete cachedReview.session.kind
+  cachedReview.session.label = reviewAction
+  await fs.writeFile(cachePath, JSON.stringify(persisted))
+  const refreshed = new SpendIndex(new SessionCatalog(f.options), { cachePath })
+  await refreshed.overview()
+  await refreshed.whenIdle()
+  const overview = await refreshed.overview()
+  assert.equal(overview.sessions.find(row => row.session.id === rootId)?.session.kind, 'review')
+  assert.equal(overview.sessions.find(row => row.session.id === rootId)?.session.label, 'Review · saved-project')
+  assert.equal(overview.totals.records, 3)
+  assert.ok(Math.abs(overview.totals.knownCostUSD - 0.0444) < 1e-12)
+  const upgraded = JSON.parse(await fs.readFile(cachePath, 'utf8'))
+  const upgradedReview = upgraded.entries.find((entry: { session: { id: string } }) => entry.session.id === rootId)
+  assert.equal(upgradedReview.session.kind, 'review')
+  assert.equal(upgradedReview.session.label, 'Review · saved-project')
+
+  await f.write(titleFile, [{ id: rootId, thread_name: 'Saved custom review title' }])
+  const renamed = (await catalog.list(true)).find(session => session.id === rootId)!
+  assert.equal(renamed.kind, 'review')
+  assert.equal(renamed.label, 'Saved custom review title')
+})
+
+test('keeps cli and vscode reviews and exec jobs without a review marker in the regular catalog', async t => {
+  const f = await fixture(t)
+  await f.codex(rootId, undefined, [enteredReview, context], false, { source: 'cli', title: 'CLI task' })
+  await f.codex(childId, undefined, [enteredReview, context], false, { source: 'vscode', title: 'IDE task' })
+  await f.codex(otherId, undefined, [context,
+    { type: 'event_msg', timestamp: stamp(1), payload: { type: 'user_message', message: reviewAction } },
+    { type: 'response_item', timestamp: stamp(2), payload: { type: 'message', role: 'user', content: '<component>Keep this user request</component>' } },
+  ], false, { source: 'exec' })
+  assert.deepEqual((await new SessionCatalog(f.options).list()).map(session => [session.id, session.kind, session.label]).sort(), [
+    [rootId, undefined, 'CLI task'], [childId, undefined, 'IDE task'], [otherId, undefined, '<component>Keep this user request</component>'],
+  ])
+})
+
+test('finds an immediate review marker split by the normal metadata window boundary', async t => {
+  const f = await fixture(t)
+  const metadata = { type: 'session_meta', timestamp: stamp(0), payload: { id: rootId, cwd: '/work/boundary-project',
+    source: 'exec', originator: 'codex_exec', base_instructions: { text: '' } } }
+  metadata.payload.base_instructions.text = 'x'.repeat(65520 - Buffer.byteLength(JSON.stringify(metadata)))
+  const file = path.join(f.options.codexDir, '2019', '02', '03', `rollout-2019-02-03T12-00-00-${rootId}.jsonl`)
+  await f.write(file, [metadata, enteredReview, context,
+    { type: 'response_item', timestamp: stamp(3), payload: { type: 'message', role: 'assistant', content: 'x'.repeat(150000) } },
+  ])
+  const [session] = await new SessionCatalog(f.options).list()
+  assert.equal(session.kind, 'review')
+  assert.equal(session.label, 'Review · boundary-project')
+})
+
 test('includes a review child once in its canonical root and persisted spend index', async t => {
   const f = await fixture(t)
   await f.codex(rootId, undefined, [context, response('root', 1)], false,

@@ -7,7 +7,7 @@ import * as path from 'node:path'
 import { createInterface } from 'node:readline'
 import type { SessionInfo } from '../extension/src/protocol'
 import { claudeUsageCalls, normalizeClaudeUsage, UsageLedger, CodexUsageTracker, type CostRecord } from '../extension/src/token-usage'
-import { codexSessionHierarchy } from '../extension/src/codex-session-metadata'
+import { codexReviewLabel, codexSessionHierarchy, isCodexExecReview, isCodexReviewAction } from '../extension/src/codex-session-metadata'
 
 interface CatalogOptions {
   claudeDir?: string
@@ -35,6 +35,7 @@ interface SavedFile {
   prompt?: string
   model?: string
   provider?: string
+  kind?: 'review'
   startTime: number
   lastActivityTime: number
 }
@@ -153,7 +154,7 @@ async function metadataWindows(file: string, size: number): Promise<string[]> {
       header = Buffer.concat([header, extra])
     }
     const firstEnd = header.indexOf(10)
-    if (firstEnd >= WINDOW) {
+    if (firstEnd >= 0) {
       const wanted = Math.min(size, firstEnd + 1 + WINDOW)
       if (wanted > header.length) header = Buffer.concat([header, await read(header.length, wanted - header.length)])
     }
@@ -360,18 +361,20 @@ export class SessionCatalog {
       let agentName = child ? path.basename(candidate.file, '.jsonl') : 'Main session'
       let project = candidate.project ?? ''
       let title: string | undefined, prompt: string | undefined, model: string | undefined, provider: string | undefined
+      let codexMetadata: unknown, kind: 'review' | undefined
       let start: number | undefined, end: number | undefined
       let count = 0
       const date = (value: unknown) => {
         const at = timestamp(value)
         if (at !== undefined) { start = Math.min(start ?? at, at); end = Math.max(end ?? at, at) }
       }
-      for (const window of await metadataWindows(candidate.file, stat.size)) for (const line of window.split('\n')) {
+      for (const [windowIndex, window] of (await metadataWindows(candidate.file, stat.size)).entries()) for (const line of window.split('\n')) {
         if (++count % 128 === 0) await yieldIO()
         const entry = parse(line)
         if (!entry) continue
         const payload = object(entry.payload), message = object(entry.message)
         if (candidate.runtime === 'codex' && entry.type === 'session_meta') {
+          codexMetadata = payload
           id = string(payload.id)
           valid = Boolean(id)
           const hierarchy = codexSessionHierarchy(payload)
@@ -393,15 +396,22 @@ export class SessionCatalog {
           date(inner.timestamp)
         }
         if (candidate.runtime === 'codex') {
+          if (windowIndex === 0 && isCodexExecReview(codexMetadata, entry)) kind = 'review'
           if (entry.type === 'turn_context') { model = string(payload.model) ?? model; project = string(payload.cwd) ?? project }
-          if (!prompt && entry.type === 'response_item' && payload.type === 'message' && payload.role === 'user') prompt = userPrompt(payload.content)
-          if (!prompt && entry.type === 'event_msg' && payload.type === 'user_message') prompt = userPrompt(payload.message)
+          if (!prompt && entry.type === 'response_item' && payload.type === 'message' && payload.role === 'user') {
+            const candidate = userPrompt(payload.content)
+            if (!isCodexReviewAction(candidate)) prompt = candidate
+          }
+          if (!prompt && entry.type === 'event_msg' && payload.type === 'user_message') {
+            const candidate = userPrompt(payload.message)
+            if (!isCodexReviewAction(candidate)) prompt = candidate
+          }
         }
         provider = string(payload.model_provider) ?? string(entry.model_provider) ?? string(message.model_provider) ?? provider
         date(entry.timestamp)
       }
       const metadata: SavedFile | undefined = valid && id ? { file: candidate.file, runtime: candidate.runtime, id, signature: key, identity: identity(stat),
-        size: stat.size, child, parentId, agentName, project, title, prompt, model, provider, startTime: start ?? stat.mtimeMs, lastActivityTime: end ?? stat.mtimeMs } : undefined
+        size: stat.size, child, parentId, agentName, project, title, prompt, model, provider, kind, startTime: start ?? stat.mtimeMs, lastActivityTime: end ?? stat.mtimeMs } : undefined
       if (signature(await fs.stat(candidate.file)) !== key) throw new Error('History changed during metadata scan')
       if (!metadata) this.sourceErrors.set(candidate.file, 'History metadata is incomplete or invalid')
       this.fileCache.set(candidate.file, { signature: key, metadata })
@@ -460,10 +470,12 @@ export class SessionCatalog {
       if (!main) continue
       const startTime = Math.min(...files.map(file => file.startTime))
       const lastActivityTime = Math.max(...files.map(file => file.lastActivityTime))
-      const title = (main.runtime === 'codex' ? titles.get(id) : undefined) ?? main.title ?? main.prompt
+      const savedTitle = [(main.runtime === 'codex' ? titles.get(id) : undefined), main.title]
+        .find(title => title && (main.runtime !== 'codex' || !isCodexReviewAction(title)))
+      const title = savedTitle ?? (main.kind === 'review' ? codexReviewLabel(main.project) : main.prompt)
         ?? `${path.basename(main.project) || main.runtime} · ${new Date(startTime).toISOString().slice(0, 10)}`
       groups.push({ info: { id, label: title, status: 'completed', historical: true, runtime: main.runtime,
-        provider: main.provider ?? familyProvider(main.model), project: main.project, startTime, lastActivityTime }, files,
+        provider: main.provider ?? familyProvider(main.model), project: main.project, startTime, lastActivityTime, ...(main.kind ? { kind: main.kind } : {}) }, files,
       signature: files.map(file => `${file.file}:${file.signature}`).sort().join('|') })
     }
     groups.sort((a, b) => b.info.lastActivityTime - a.info.lastActivityTime || a.info.id.localeCompare(b.info.id))

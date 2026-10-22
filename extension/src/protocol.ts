@@ -36,6 +36,7 @@ export interface SessionInfo {
   startTime: number
   lastActivityTime: number
   runtime?: 'claude' | 'codex'
+  kind?: 'review'
   provider?: string
   historical?: boolean
   project?: string
@@ -53,7 +54,7 @@ export type ExtensionToWebviewMessage =
   | { type: 'session-list'; sessions: SessionInfo[] }
   | { type: 'session-started'; session: SessionInfo }
   | { type: 'session-ended'; sessionId: string }
-  | { type: 'session-updated'; sessionId: string; label: string }
+  | { type: 'session-updated'; sessionId: string; label: string; session?: SessionInfo }
 
 export interface VisualizerConfig {
   mode: 'live' | 'replay'
