@@ -24,6 +24,8 @@ interface SavedFile {
   runtime: Runtime
   id: string
   signature: string
+  identity: string
+  size: number
   parentId?: string
   child: boolean
   agentName: string
@@ -37,6 +39,23 @@ interface SavedFile {
 }
 interface FileCandidate { file: string; runtime: Runtime; rootId?: string; project?: string; child?: boolean }
 interface SessionGroup { info: SavedSession; files: SavedFile[]; signature: string }
+export interface SessionSourceStamp { file: string; signature: string; identity: string; size: number }
+export interface SessionCatalogSnapshot {
+  session: SessionInfo
+  signature: string
+  agentCount: number
+  sources: SessionSourceStamp[]
+}
+export interface SessionCatalogReport {
+  snapshots: SessionCatalogSnapshot[]
+  errors: Array<{ file: string; message: string }>
+}
+export class SessionSourceChangedError extends Error {}
+
+function groupSnapshot(group: SessionGroup): SessionCatalogSnapshot {
+  return { session: { ...group.info }, signature: group.signature, agentCount: group.files.length,
+    sources: group.files.map(({ file, signature, identity, size }) => ({ file, signature, identity, size })) }
+}
 
 const WINDOW = 64 * 1024
 const MAX_LINE = 1024 * 1024
@@ -45,6 +64,7 @@ const object = (value: unknown): Json => value && typeof value === 'object' && !
 const string = (value: unknown): string | undefined => typeof value === 'string' && value.trim() ? value.trim() : undefined
 const label = (value: unknown) => string(value)?.replace(/\s+/g, ' ').slice(0, 180)
 const signature = (stat: Stats) => `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.ino}`
+const identity = (stat: Stats) => `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`
 const yieldIO = () => new Promise<void>(resolve => setImmediate(resolve))
 
 function timestamp(value: unknown): number | undefined {
@@ -84,7 +104,10 @@ function userPrompt(raw: unknown): string | undefined {
 
 async function entries(directory: string) {
   try { return await fs.readdir(directory, { withFileTypes: true }) }
-  catch { return [] }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw error
+  }
 }
 
 async function walk(directory: string): Promise<string[]> {
@@ -158,7 +181,7 @@ async function metadataWindows(file: string, size: number): Promise<string[]> {
 }
 
 /** Async streaming is reserved for the selected root and the small title index. */
-async function* jsonLines(file: string): AsyncGenerator<Json> {
+async function* jsonLines(file: string, strict = false): AsyncGenerator<Json> {
   const input = createReadStream(file, { encoding: 'utf8' })
   const lines = createInterface({ input, crlfDelay: Infinity })
   let count = 0
@@ -166,9 +189,13 @@ async function* jsonLines(file: string): AsyncGenerator<Json> {
     for await (const line of lines) {
       if (++count % 128 === 0) await yieldIO()
       const record = parse(line)
+      if (strict && line.trim() && !record) throw new Error('History contains incomplete or invalid JSON')
       if (record) yield record
     }
-  } catch { /* Files may disappear or rotate during a read. */ }
+  } catch (error) {
+    if (strict) throw error
+    // Interactive history can still show readable records from a damaged file.
+  }
   finally { lines.close(); input.destroy() }
 }
 
@@ -180,7 +207,8 @@ export class SessionCatalog {
   private groups = new Map<string, SessionGroup>()
   private listedAt = 0
   private listing?: Promise<SessionInfo[]>
-  private loaded = new Map<string, { signature: string; records: CostRecord[] }>()
+  private sourceErrors = new Map<string, string>()
+  private loaded = new Map<string, { signature: string; records: CostRecord[]; verified?: boolean }>()
   private loading = new Map<string, { signature: string; promise: Promise<CostRecord[]> }>()
 
   constructor(options: CatalogOptions = {}) {
@@ -232,6 +260,65 @@ export class SessionCatalog {
     }
   }
 
+  /** One metadata scan supplies all roots. Snapshot reads never rescan the catalog. */
+  async snapshots(force = false): Promise<SessionCatalogSnapshot[]> {
+    const report = await this.snapshotReport(force)
+    if (report.errors.length) throw new Error(report.errors[0].message)
+    return report.snapshots
+  }
+
+  /** Source faults do not hide healthy roots from the global index. Directory scan failures still reject. */
+  async snapshotReport(force = false): Promise<SessionCatalogReport> {
+    await this.list(force)
+    return { snapshots: [...this.groups.values()].map(groupSnapshot),
+    errors: [...this.sourceErrors].map(([file, message]) => ({ file, message })) }
+  }
+
+  /** Refresh known sources of one live root without repeating the whole directory scan. */
+  async refreshSnapshot(snapshot: SessionCatalogSnapshot): Promise<SessionCatalogSnapshot> {
+    const group = this.groups.get(snapshot.session.id)
+    if (!group || group.signature !== snapshot.signature) throw new SessionSourceChangedError('Session changed since its catalog snapshot')
+    const files: SavedFile[] = []
+    for (const previous of group.files) {
+      const current = await this.metadata({ file: previous.file, runtime: previous.runtime,
+        ...(previous.runtime === 'claude' ? { rootId: previous.child ? previous.parentId : previous.id,
+          project: previous.project, child: previous.child } : {}) })
+      if (!current) throw new Error(this.sourceErrors.get(previous.file) ?? 'History metadata is incomplete or invalid')
+      if (current.identity !== previous.identity || current.size < previous.size) throw new Error('A session source was replaced or truncated')
+      if (current.id !== previous.id || current.parentId !== previous.parentId || current.child !== previous.child) throw new Error('Session ancestry changed while indexing')
+      files.push(current)
+    }
+    const main = files.find(file => file.id === group.info.id && !file.child)!
+    const refreshed: SessionGroup = { info: { ...group.info, project: main.project, provider: main.provider ?? familyProvider(main.model),
+      startTime: Math.min(...files.map(file => file.startTime)), lastActivityTime: Math.max(...files.map(file => file.lastActivityTime)) },
+    files, signature: files.map(file => `${file.file}:${file.signature}`).sort().join('|') }
+    this.groups.set(group.info.id, refreshed)
+    return groupSnapshot(refreshed)
+  }
+
+  /** Separates caches for different homes/runtime flags without putting paths in responses. */
+  get sourceKey(): string { return JSON.stringify(this.options) }
+
+  async recordsForSnapshot(snapshot: SessionCatalogSnapshot): Promise<CostRecord[]> {
+    const group = this.groups.get(snapshot.session.id)
+    if (!group || group.signature !== snapshot.signature) throw new SessionSourceChangedError('Session changed since its catalog snapshot')
+    const verify = async () => {
+      for (const file of group.files) {
+        if (signature(await fs.stat(file.file)) !== file.signature) throw new SessionSourceChangedError('Session source changed while indexing')
+      }
+    }
+    await verify()
+    const cached = this.loaded.get(group.info.id)
+    if (cached?.signature === group.signature && cached.verified) return cached.records
+    const records = await this.readRecords(group, true)
+    await verify()
+    // Only verified, unchanged snapshots can be reused by the persistent index.
+    this.loaded.delete(group.info.id)
+    this.loaded.set(group.info.id, { signature: group.signature, records, verified: true })
+    while (this.loaded.size > 3) this.loaded.delete(this.loaded.keys().next().value!)
+    return records
+  }
+
   private async candidates(): Promise<FileCandidate[]> {
     const [codexFiles, archivedFiles, claudeProjects] = await Promise.all([
       this.options.includeCodex ? walk(this.options.codexDir) : [],
@@ -256,11 +343,15 @@ export class SessionCatalog {
   }
 
   private async metadata(candidate: FileCandidate): Promise<SavedFile | undefined> {
+    this.sourceErrors.delete(candidate.file)
     try {
       const stat = await fs.stat(candidate.file)
       const key = signature(stat)
       const cached = this.fileCache.get(candidate.file)
-      if (cached?.signature === key) return cached.metadata
+      if (cached?.signature === key) {
+        if (!cached.metadata) this.sourceErrors.set(candidate.file, 'History metadata is incomplete or invalid')
+        return cached.metadata
+      }
       let id = candidate.rootId
       let valid = false
       let child = candidate.child ?? false
@@ -309,11 +400,13 @@ export class SessionCatalog {
         provider = string(payload.model_provider) ?? string(entry.model_provider) ?? string(message.model_provider) ?? provider
         date(entry.timestamp)
       }
-      const metadata: SavedFile | undefined = valid && id ? { file: candidate.file, runtime: candidate.runtime, id, signature: key,
-        child, parentId, agentName, project, title, prompt, model, provider, startTime: start ?? stat.mtimeMs, lastActivityTime: end ?? stat.mtimeMs } : undefined
+      const metadata: SavedFile | undefined = valid && id ? { file: candidate.file, runtime: candidate.runtime, id, signature: key, identity: identity(stat),
+        size: stat.size, child, parentId, agentName, project, title, prompt, model, provider, startTime: start ?? stat.mtimeMs, lastActivityTime: end ?? stat.mtimeMs } : undefined
+      if (signature(await fs.stat(candidate.file)) !== key) throw new Error('History changed during metadata scan')
+      if (!metadata) this.sourceErrors.set(candidate.file, 'History metadata is incomplete or invalid')
       this.fileCache.set(candidate.file, { signature: key, metadata })
       return metadata
-    } catch { return }
+    } catch (error) { this.sourceErrors.set(candidate.file, error instanceof Error ? error.message : String(error)); return }
   }
 
   private async titles(): Promise<Map<string, string>> {
@@ -334,6 +427,7 @@ export class SessionCatalog {
   }
 
   private async scan(): Promise<SessionInfo[]> {
+    this.sourceErrors = new Map()
     const [candidates, titles] = await Promise.all([this.candidates(), this.options.includeCodex ? this.titles() : new Map<string, string>()])
     const files = (await mapLimited(candidates, candidate => this.metadata(candidate))).filter((file): file is SavedFile => Boolean(file))
     const present = new Set(candidates.map(candidate => candidate.file))
@@ -379,24 +473,28 @@ export class SessionCatalog {
     return groups.map(group => ({ ...group.info }))
   }
 
-  private async readRecords(group: SessionGroup): Promise<CostRecord[]> {
+  private async readRecords(group: SessionGroup, strict = false): Promise<CostRecord[]> {
     if (group.info.runtime === 'codex') {
       const records: CostRecord[] = []
       for (const file of group.files) {
         const usage = new CodexUsageTracker()
-        let model = '', effort: string | null = null
-        for await (const entry of jsonLines(file.file)) {
+        let model = '', effort: string | null = null, provider: string | undefined
+        for await (const entry of jsonLines(file.file, strict)) {
           const payload = object(entry.payload)
-          if (entry.type === 'turn_context') {
+          if (entry.type === 'session_meta') {
+            provider = string(payload.model_provider) ?? string(entry.model_provider) ?? provider
+          } else if (entry.type === 'turn_context') {
             model = string(payload.model) ?? model
             effort = string(payload.effort ?? payload.reasoning_effort) ?? null
+            provider = string(payload.model_provider) ?? string(entry.model_provider) ?? provider
           } else if (entry.type === 'token_usage_record') {
-            usage.recordResponse(payload, model, timestamp(entry.timestamp), effort)
+            usage.recordResponse(payload, model, timestamp(entry.timestamp), effort, string(payload.model_provider) ?? string(entry.model_provider) ?? provider)
           } else if (entry.type === 'event_msg' && payload.type === 'token_count') {
-            usage.record(object(payload.info), model, timestamp(entry.timestamp), effort)
+            usage.record(object(payload.info), model, timestamp(entry.timestamp), effort, string(payload.model_provider) ?? string(entry.model_provider) ?? provider)
           }
         }
-        for (const record of usage.costRecords()) records.push({ ...record, agentId: file.id, agentName: file.id === group.info.id ? 'Main session' : file.agentName })
+        for (const record of usage.costRecords()) records.push({ ...record, provider: record.provider ?? file.provider ?? familyProvider(record.model),
+          agentId: file.id, agentName: file.id === group.info.id ? 'Main session' : file.agentName })
       }
       return records
     }
@@ -417,14 +515,16 @@ export class SessionCatalog {
       if (!id || !tokens) return
       const setting = (value: unknown): string | null | undefined => typeof value === 'string' ? value : value === null ? null : undefined
       ledger.record(id, agent, model, tokens, undefined, timestamp(entry.timestamp), claudeUsageCalls(message.usage),
-        { effort: setting(entry.effort), perTurnEffort: setting(entry.perTurnEffort) })
+        { effort: setting(entry.effort), perTurnEffort: setting(entry.perTurnEffort), provider: string(message.model_provider) ?? string(entry.model_provider) })
     }
     // The ledger retains the first owner; authoritative subagent files precede
     // their inline mirrors so cache-reuse analytics keep the correct thread.
     const files = [...group.files].sort((a, b) => Number(b.child) - Number(a.child))
-    for (const file of files) for await (const entry of jsonLines(file.file)) {
+    for (const file of files) for await (const entry of jsonLines(file.file, strict)) {
       recordEntry(entry, file.child ? path.basename(file.file, '.jsonl') : 'orchestrator')
     }
-    return [...ledger.costRecords()].map(record => record.agentId === 'orchestrator' ? { ...record, agentId: group.info.id } : record)
+    const providers = new Map(files.map(file => [file.child ? path.basename(file.file, '.jsonl') : 'orchestrator', file.provider]))
+    return [...ledger.costRecords()].map(record => ({ ...record, provider: record.provider ?? providers.get(record.agentId ?? '') ?? familyProvider(record.model),
+      ...(record.agentId === 'orchestrator' ? { agentId: group.info.id } : {}) }))
   }
 }

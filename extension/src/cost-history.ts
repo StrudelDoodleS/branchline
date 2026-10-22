@@ -5,6 +5,7 @@ import { buildCacheReuse, type CacheReuseAnalytics } from './cache-reuse'
 
 export interface CostBreakdown { input: number; output: number; cacheRead: number; cacheWrite: number; unattributed: number }
 export interface CostRecord {
+  provider?: string
   agentId?: string
   agentName?: string
   kind?: string

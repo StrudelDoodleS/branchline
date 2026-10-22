@@ -240,3 +240,35 @@ test('runtime flags prevent scanning disabled histories and forced listing notic
   assert.equal((await catalog.list(true))[0].label, 'Renamed later')
   assert.equal((await new SessionCatalog({ ...f.options, includeClaude: false }).list()).length, 1)
 })
+
+// Catches rescanning the whole catalog per indexed root and accepting an append halfway through a snapshot.
+test('snapshot reads avoid catalog rescans and reject changed or incomplete sources', async t => {
+  const f = await fixture(t)
+  const file = await f.codex(rootId, undefined, [context, response('root', 1)])
+  const catalog = new SessionCatalog(f.options)
+  const snapshot = (await catalog.snapshots())[0]
+  assert.equal(snapshot.session.id, rootId)
+  assert.equal(snapshot.agentCount, 1)
+  const first = await catalog.recordsForSnapshot(snapshot)
+  assert.equal(first.length, 1)
+  await fs.appendFile(file, JSON.stringify(response('next', 2)) + '\n')
+  await assert.rejects(catalog.recordsForSnapshot(snapshot), /changed/i)
+  const next = (await catalog.snapshots(true))[0]
+  assert.notEqual(next.signature, snapshot.signature)
+  assert.equal((await catalog.recordsForSnapshot(next)).length, 2)
+  await fs.appendFile(file, '{"type":"token_usage_record",')
+  await assert.rejects(catalog.recordsForSnapshot((await catalog.snapshots(true))[0]), /incomplete|invalid/i)
+})
+
+// Catches the file metadata cache forgetting that an unreadable root is an error on the next scan.
+test('strict snapshots keep rejecting a truncated root across repeated metadata scans', async t => {
+  const f = await fixture(t)
+  const file = await f.codex(rootId, undefined, [context, response('root', 1)])
+  const catalog = new SessionCatalog(f.options)
+  await catalog.snapshots()
+  await fs.writeFile(file, '{"type":"session_meta",')
+  await assert.rejects(catalog.snapshots(true), /incomplete|invalid/i)
+  await assert.rejects(catalog.snapshots(true), /incomplete|invalid/i)
+  await fs.writeFile(file, '')
+  await assert.rejects(catalog.snapshots(true), /incomplete|invalid/i)
+})

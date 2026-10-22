@@ -45,6 +45,9 @@ async function main() {
     if (req.method === 'GET' && (req.url === '/session-catalog' || req.url?.startsWith('/session-catalog?'))) {
       return relay.handleSessionCatalog(req, res)
     }
+    if (req.method === 'GET' && (req.url === '/spend-overview' || req.url?.startsWith('/spend-overview?'))) {
+      return relay.handleSpendOverview(req, res)
+    }
 
     res.writeHead(200, { 'Content-Type': 'text/plain' })
     res.end('Branchline Dev Relay')

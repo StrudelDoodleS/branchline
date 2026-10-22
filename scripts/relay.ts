@@ -27,6 +27,8 @@ import { SessionReplayStore } from './session-replay'
 import { claudeContextPayload } from '../extension/src/claude-context'
 import { buildCostHistory, normalizeCostHistoryOptions } from '../extension/src/token-usage'
 import { SessionCatalog } from './session-catalog'
+import { SpendIndex } from './spend-index'
+import { normalizeSpendOverviewOptions, SpendWindowError } from '../extension/src/spend-overview'
 
 const MAX_EVENT_BUFFER = 5000
 const DISCOVERY_DIR = path.join(os.homedir(), '.claude', 'agent-flow')
@@ -360,6 +362,7 @@ export interface Relay {
   handleSessionReplay: (req: http.IncomingMessage, res: http.ServerResponse) => Promise<void>
   handleCostHistory: (req: http.IncomingMessage, res: http.ServerResponse) => Promise<void>
   handleSessionCatalog: (req: http.IncomingMessage, res: http.ServerResponse) => Promise<void>
+  handleSpendOverview: (req: http.IncomingMessage, res: http.ServerResponse) => Promise<void>
   /** Clean up all resources */
   dispose: () => void
 }
@@ -397,6 +400,7 @@ export async function createRelay(options: RelayOptions): Promise<Relay> {
   const wantClaude = mode === 'claude' || mode === 'auto'
   const wantCodex = mode === 'codex' || mode === 'auto'
   const sessionCatalog = new SessionCatalog({ includeClaude: wantClaude, includeCodex: wantCodex })
+  const spendIndex = new SpendIndex(sessionCatalog)
   log(`[relay] Runtime mode: ${mode} (watching: ${[wantClaude && 'claude', wantCodex && 'codex'].filter(Boolean).join(', ')})`)
 
   let hookServer: HookServer | null = null
@@ -559,6 +563,35 @@ export async function createRelay(options: RelayOptions): Promise<Relay> {
         res.end(JSON.stringify(history ? { sessionId, history } : { error: 'Cost history is unavailable' }))
       } catch {
         res.writeHead(500, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify({ error: 'Could not load saved session costs' }))
+      }
+    },
+
+    async handleSpendOverview(req: http.IncomingMessage, res: http.ServerResponse) {
+      const params = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams
+      if (params.get('status') === '1') {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+        res.end(JSON.stringify(spendIndex.status()))
+        return
+      }
+      let options
+      try { options = normalizeSpendOverviewOptions(Object.fromEntries(params)) }
+      catch (error) {
+        res.writeHead(400, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+        res.end(JSON.stringify({ error: error instanceof Error ? error.message : 'Invalid spend query' }))
+        return
+      }
+      try {
+        const overview = await spendIndex.overview(options)
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+        res.end(JSON.stringify(overview))
+      } catch (error) {
+        if (error instanceof SpendWindowError) {
+          res.writeHead(400, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+          res.end(JSON.stringify({ error: error.message }))
+          return
+        }
+        res.writeHead(500, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+        res.end(JSON.stringify({ error: 'Spend overview is unavailable' }))
       }
     },
 

@@ -26,6 +26,7 @@ import { MessageFeedPanel } from "./message-feed-panel"
 import { TopBar } from "./top-bar"
 import { AgentTreeView } from "./agent-tree-view"
 import { UsagePanel } from "./usage-panel"
+import { SpendDashboard } from "./spend-dashboard"
 import { sessionUsage } from "@/lib/usage"
 import { useAudioEffects } from "@/hooks/use-audio-effects"
 import { localDay } from "@/hooks/burn-comparison"
@@ -76,6 +77,9 @@ export function AgentVisualizer() {
   const [showStats, setShowStats] = useState(false)
   const [showHexGrid, setShowHexGrid] = useState(true)
   const [showCostOverlay, setShowCostOverlay] = useState(false)
+  const [showSpendDashboard, setShowSpendDashboard] = useState(false)
+  const [costsFromDashboard, setCostsFromDashboard] = useState(false)
+  const allCostsTriggerRef = useRef<HTMLButtonElement>(null)
   const [showTimeline, setShowTimeline] = useState(false)
   const [showFileAttention, setShowFileAttention] = useState(false)
   const [showTranscript, setShowTranscript] = useState(false)
@@ -84,6 +88,8 @@ export function AgentVisualizer() {
 
   // Mutually exclusive panel toggling — opening one closes the others
   const toggleExclusivePanel = useCallback((panel: 'files' | 'transcript' | 'cost') => {
+    setCostsFromDashboard(false)
+    setShowSpendDashboard(false)
     setShowFileAttention(prev => panel === 'files' ? !prev : false)
     setShowTranscript(prev => panel === 'transcript' ? !prev : false)
     setShowCostOverlay(prev => panel === 'cost' ? !prev : false)
@@ -444,7 +450,18 @@ export function AgentVisualizer() {
       {/* Timeline panel (slide-in from bottom) */}
       <UsagePanel visible={showCostOverlay} agents={agents} sessionId={bridge.selectedSessionId} sessionLabel={selectedSessionInfo?.label}
         initialComparisonDay={selectedSessionInfo?.historical ? localDay(selectedSessionInfo.lastActivityTime) : undefined}
+        initialView={costsFromDashboard ? 'spend' : undefined}
+        onBack={costsFromDashboard ? () => { setShowCostOverlay(false); setShowSpendDashboard(true) } : undefined}
         onClose={() => setShowCostOverlay(false)} />
+
+      <SpendDashboard visible={showSpendDashboard} returnFocusRef={allCostsTriggerRef} onClose={() => setShowSpendDashboard(false)}
+        onSelectSession={session => {
+          const live = bridge.sessions.find(row => row.id === session.id && !row.historical)
+          bridge.selectSession(session.id, live ? undefined : session)
+          setCostsFromDashboard(true)
+          setShowSpendDashboard(false)
+          setShowCostOverlay(true)
+        }} />
 
       <TimelinePanel
         visible={showTimeline}
@@ -467,10 +484,18 @@ export function AgentVisualizer() {
         selectedSessionId={bridge.selectedSessionId}
         sessionsWithActivity={bridge.sessionsWithActivity}
         onSelectSession={(id, saved) => {
+          setCostsFromDashboard(false)
           bridge.selectSession(id, saved)
           if (saved?.historical) { setShowFileAttention(false); setShowTranscript(false); setShowCostOverlay(true) }
         }}
         onCloseSession={handleCloseSession}
+        allCostsTriggerRef={allCostsTriggerRef}
+        onOpenAllCosts={() => {
+          setShowCostOverlay(false)
+          setShowFileAttention(false)
+          setShowTranscript(false)
+          setShowSpendDashboard(true)
+        }}
         isVSCode={bridge.isVSCode}
         connectionStatus={bridge.connectionStatus}
         agentCount={agents.size}

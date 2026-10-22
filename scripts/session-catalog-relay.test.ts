@@ -12,7 +12,9 @@ import type { Relay } from './relay'
 test('relay retains archived child charges and broadcasts the real provider and last activity for later discoveries', { timeout: 10000 }, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'branchline-catalog-relay-'))
   const previous = process.env.CODEX_HOME
+  const previousCache = process.env.XDG_CACHE_HOME
   process.env.CODEX_HOME = directory
+  process.env.XDG_CACHE_HOME = path.join(directory, 'cache')
   const main = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa', child = 'bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb', later = 'cccccccc-cccc-4ccc-cccc-cccccccccccc'
   const at = Date.now() - 120000
   const day = new Date(at).toISOString().slice(0, 10)
@@ -43,6 +45,7 @@ test('relay retains archived child charges and broadcasts the real provider and 
     server = http.createServer((req, res) => {
       if (req.url === '/events') { relay!.handleSSE(req, res); res.flushHeaders(); return }
       if (req.url?.startsWith('/session-cost-history?')) { void relay!.handleCostHistory(req, res); return }
+      if (req.url?.startsWith('/spend-overview')) { void relay!.handleSpendOverview(req, res); return }
       res.writeHead(404); res.end()
     })
     await new Promise<void>(resolve => server!.listen(0, '127.0.0.1', resolve))
@@ -52,6 +55,24 @@ test('relay retains archived child charges and broadcasts the real provider and 
     const { history } = await response.json() as { history: { totalCostUSD: number; cacheReuse: { agents: unknown[] } } }
     assert.ok(Math.abs(history.totalCostUSD - 0.00117) < 1e-10, `A watched main session must include archived children; got ${history.totalCostUSD}`)
     assert.equal(history.cacheReuse.agents.length, 2)
+    const invalid = await fetch(`${origin}/spend-overview?timezone=not-a-timezone`)
+    assert.equal(invalid.status, 400)
+    const overviewResponse = await fetch(`${origin}/spend-overview`)
+    assert.equal(overviewResponse.status, 200)
+    const pendingOverview = await overviewResponse.json() as { status: { state: string } }
+    assert.equal(pendingOverview.status.state, 'indexing')
+    let state = 'indexing'
+    for (let attempt = 0; attempt < 100 && state === 'indexing'; attempt++) {
+      const progress = await (await fetch(`${origin}/spend-overview?status=1`)).json() as { status: { state: string } }
+      assert.deepEqual(Object.keys(progress), ['status'])
+      state = progress.status.state
+    }
+    assert.equal(state, 'ready')
+    const overview = await (await fetch(`${origin}/spend-overview`)).json() as { totals: { knownCostUSD: number; records: number }; sessions: Array<{ indexed: boolean }> }
+    assert.ok(Math.abs(overview.totals.knownCostUSD - 0.00117) < 1e-10)
+    assert.equal(overview.totals.records, 2)
+    assert.equal(overview.sessions.length, 1)
+    assert.equal(overview.sessions[0].indexed, true)
     const stream = await fetch(origin + '/events', { signal: abort.signal })
     const reader = stream.body!.getReader()
     const file = write(current, later, 1000, undefined, 'custom-vendor')
@@ -78,6 +99,7 @@ test('relay retains archived child charges and broadcasts the real provider and 
     relay?.dispose()
     if (server) await new Promise<void>(resolve => server!.close(() => resolve()))
     if (previous === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previous
+    if (previousCache === undefined) delete process.env.XDG_CACHE_HOME; else process.env.XDG_CACHE_HOME = previousCache
     fs.rmSync(directory, { recursive: true, force: true })
   }
 })

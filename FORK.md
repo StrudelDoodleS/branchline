@@ -29,6 +29,7 @@ Branchline is maintained by StrudelDoodleS and derives from Agent Flow by Simon 
 - A full-screen phone cost view with Spend/Burn/Compare tabs, one visible chart, rounded rate curves, hourly burn by default, and model filters and diagnostics behind disclosures.
 - Daily comparisons open by default, with a source date, selectable comparison dates or date ranges, smooth coloured day lines, full-day and equal-elapsed-time modes, and completed days loaded without repeated refreshes.
 - A custom phone session chooser with expandable last-24-hours and date rows, readable titles, provider buttons and search, ordered by last activity; older main sessions and their subagent usage load on demand from saved Claude and Codex logs. Selecting a saved session opens analytics at its last-used day, and resumed sessions return to the live stream.
+- An All costs dashboard across saved sessions, with local-day periods, daily spend, provider and model/reasoning filters, source breakdowns, and searchable session costs. A session row opens its detailed Spend view; Back preserves the dashboard position and filters. Canonical main/subagent usage is indexed once into a private persistent summary cache, refreshed only for changed sources, with indexing progress and explicit unpriced, untimed or stale data.
 - Root, extension, and browser regression coverage for these behaviors.
 - Separate Branchline package identities and branding; telemetry defaults off with no collector configured.
 

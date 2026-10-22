@@ -93,7 +93,7 @@ function HistoryPlot({ series: data, label, start, end, loaded, bounds, selected
   </svg>
 }
 
-export function CostHistoryChart({ sessionId, initialComparisonDay }: { sessionId: string | null; initialComparisonDay?: string }) {
+export function CostHistoryChart({ sessionId, initialComparisonDay, initialView = 'compare' }: { sessionId: string | null; initialComparisonDay?: string; initialView?: 'spend' | 'burn' | 'compare' }) {
   const [options, setOptions] = useState<CostHistoryOptions>({ groupBy: 'model', resolution: 'auto', range: 'total' })
   const { history, error, retry, loading, isPreviousData } = useCostHistory(sessionId, options)
   const [selectedTime, setSelectedTime] = useState<number | null>(null)
@@ -101,7 +101,7 @@ export function CostHistoryChart({ sessionId, initialComparisonDay }: { sessionI
   const [preview, setPreview] = useState<CostTimeWindow | null>(null)
   const [burnSource, setBurnSource] = useState<'all' | BurnSource>('total')
   const [burnView, setBurnView] = useState<'lines' | 'bars' | 'daily'>('daily')
-  const [view, setView] = useState<'spend' | 'burn' | 'compare'>('compare')
+  const [view, setView] = useState<'spend' | 'burn' | 'compare'>(initialView)
   const [filters, setFilters] = useState(false)
   const [chartDetails, setChartDetails] = useState(false)
   const [reuseDetails, setReuseDetails] = useState(false)

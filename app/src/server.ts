@@ -45,6 +45,9 @@ export async function startServer(options: ServerOptions) {
     if (req.method === 'GET' && (req.url === '/session-catalog' || req.url?.startsWith('/session-catalog?'))) {
       return relay.handleSessionCatalog(req, res)
     }
+    if (req.method === 'GET' && (req.url === '/spend-overview' || req.url?.startsWith('/spend-overview?'))) {
+      return relay.handleSpendOverview(req, res)
+    }
 
     // Static files (UI)
     if (req.method === 'GET') {

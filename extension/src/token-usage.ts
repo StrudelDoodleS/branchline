@@ -17,7 +17,7 @@ export interface UsageTotals extends TokenCounts {
 export * from './cost-history'
 import type { CostRecord, CostBreakdown } from './cost-history'
 
-export interface ReasoningSettings { effort?: string | null; perTurnEffort?: string | null }
+export interface ReasoningSettings { effort?: string | null; perTurnEffort?: string | null; provider?: string }
 interface UsageCall extends TokenCounts { model?: string; kind?: string; reasoningEffort?: string | null }
 
 const PARTS = ['input', 'output', 'cacheRead', 'cacheWrite', 'unattributed'] as const
@@ -65,6 +65,11 @@ const PRICES: Record<string, Rates> = {
   'claude-sonnet-4-5': { input: 3, output: 15, read: 0.3, write: 3.75, write1h: 6.0, longAfter: 200000, longInput: 2, longOutput: 1.5 },
   'claude-haiku-4-5': { input: 1, output: 5, read: 0.1, write: 1.25, write1h: 2 },
 }
+
+/** Persistent aggregates must change keys when prices or usage semantics change.
+ * Bump schema when normalization/pricing math changes; rate edits are automatic. */
+export const COST_PRICING_FINGERPRINT = JSON.stringify({ schema: 1, prices: PRICES }, (_key, value) =>
+  typeof value === 'number' && !Number.isFinite(value) ? String(value) : value)
 
 const KEYS = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'cacheWrite1hTokens', 'reasoningTokens'] as const
 const emptyCounts = (): TokenCounts => ({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, reasoningTokens: 0 })
@@ -151,7 +156,7 @@ export function apiCost(model: string, tokens: TokenCounts, requestInput?: numbe
  * Response IDs are session-wide, so inline progress and subagent files dedup. */
 export class UsageLedger {
   private responses = new Map<string, { agent: string; model: string; tokens: TokenCounts; cost: number | null;
-    breakdown: CostBreakdown | null; timestamp?: number; effort?: string; perTurnEffort?: string; records: CostRecord[] }>()
+    breakdown: CostBreakdown | null; timestamp?: number; effort?: string; perTurnEffort?: string; provider?: string; records: CostRecord[] }>()
   private agents = new Map<string, { tokens: TokenCounts; cost: number; unpriced: number }>()
 
   record(id: string, agent: string, model: string, tokens: TokenCounts, requestInput?: number, timestamp?: number,
@@ -162,6 +167,8 @@ export class UsageLedger {
     model ||= old?.model ?? ''
     const effort = settings.effort === undefined ? old?.effort : settings.effort?.trim() || undefined
     const perTurnEffort = settings.perTurnEffort === undefined ? old?.perTurnEffort : settings.perTurnEffort?.trim() || undefined
+    // A streamed mirror can update tokens, but attribution stays with the first owner.
+    const provider = old?.provider ?? (!old || old.agent === agent ? settings.provider?.trim() || undefined : undefined)
     const reasoningEffort = perTurnEffort || effort
     let breakdown: CostBreakdown | null = emptyBreakdown()
     const records: CostRecord[] = []
@@ -173,13 +180,14 @@ export class UsageLedger {
       const callTokens = emptyCounts()
       for (const key of KEYS) callTokens[key] = call[key]
       records.push({ model: callModel || undefined, reasoningEffort: callEffort, tokens: callTokens,
+        ...(provider ? { provider } : {}),
         ...('kind' in call && call.kind ? { kind: call.kind } : {}),
         timestamp: old?.timestamp ?? at, costUSD: parts ? sumBreakdown(parts) : null, breakdownUSD: parts ?? undefined })
       if (!parts) breakdown = null
       else if (breakdown) addBreakdown(breakdown, parts)
     }
     if (old && model === old.model && KEYS.every(key => tokens[key] === old.tokens[key])
-      && PARTS.every(key => old.breakdown?.[key] === breakdown?.[key]) && old.effort === effort && old.perTurnEffort === perTurnEffort
+      && PARTS.every(key => old.breakdown?.[key] === breakdown?.[key]) && old.effort === effort && old.perTurnEffort === perTurnEffort && old.provider === provider
       && old.records.length === records.length && records.every((record, index) => {
         const previous = old.records[index]
         return record.model === previous.model && record.reasoningEffort === previous.reasoningEffort
@@ -196,7 +204,7 @@ export class UsageLedger {
     entry.unpriced += Number(cost === null) - Number(old?.cost === null)
     this.agents.set(owner, entry)
     this.responses.set(id, { agent: owner, model, tokens: { ...tokens }, cost, breakdown, timestamp: old?.timestamp ?? at,
-      effort, perTurnEffort, records })
+      effort, perTurnEffort, provider, records })
     return owner
   }
 
@@ -220,11 +228,11 @@ export class CodexUsageTracker {
   private revision = 0
   private beforeLast?: UsageTotals
   private responses?: UsageLedger
-  private responseSettings = new Map<string, { model: string; effort: string | null }>()
+  private responseSettings = new Map<string, { model: string; effort: string | null; provider?: string }>()
   private prefix?: UsageTotals
   private prefixRecords?: CostRecord[]
 
-  record(info: Record<string, unknown>, model: string, timestamp?: number, reasoningEffort?: string | null): void {
+  record(info: Record<string, unknown>, model: string, timestamp?: number, reasoningEffort?: string | null, provider?: string): void {
     if (this.responses) return // legacy token_count mirrors omit compaction calls
     const tokens = normalizeCodexUsage(info.total_token_usage)
     if (!tokens || KEYS.some(key => tokens[key] < this.previous[key])) return
@@ -234,11 +242,11 @@ export class CodexUsageTracker {
     const last = object(info.last_token_usage)
     const requestInput = typeof last.input_tokens === 'number' ? last.input_tokens : delta.inputTokens + delta.cacheReadTokens + delta.cacheWriteTokens
     this.beforeLast = this.ledger.snapshot('orchestrator')
-    this.ledger.record(String(++this.revision), 'orchestrator', model, delta, requestInput, timestamp, undefined, { effort: reasoningEffort })
+    this.ledger.record(String(++this.revision), 'orchestrator', model, delta, requestInput, timestamp, undefined, { effort: reasoningEffort, provider })
     this.previous = tokens
   }
 
-  recordResponse(payload: Record<string, unknown>, model: string, timestamp?: number, reasoningEffort?: string | null): void {
+  recordResponse(payload: Record<string, unknown>, model: string, timestamp?: number, reasoningEffort?: string | null, provider?: string): void {
     const id = payload.response_id
     const tokens = normalizeCodexUsage(payload.usage)
     if (typeof id !== 'string' || !id || !tokens) return
@@ -265,8 +273,9 @@ export class CodexUsageTracker {
     const reported = payload.effort ?? payload.reasoning_effort
     const effort = 'effort' in payload || 'reasoning_effort' in payload ? typeof reported === 'string' ? reported : null
       : captured?.model === responseModel ? captured.effort : responseModel === model ? reasoningEffort : null
-    this.responseSettings.set(id, { model: responseModel, effort: effort ?? null })
-    this.responses.record(id, 'orchestrator', responseModel, tokens, undefined, timestamp, undefined, { effort })
+    const responseProvider = typeof payload.model_provider === 'string' && payload.model_provider.trim() ? payload.model_provider.trim() : captured?.provider ?? provider
+    this.responseSettings.set(id, { model: responseModel, effort: effort ?? null, provider: responseProvider })
+    this.responses.record(id, 'orchestrator', responseModel, tokens, undefined, timestamp, undefined, { effort, provider: responseProvider })
   }
 
   *costRecords(): IterableIterator<CostRecord> {

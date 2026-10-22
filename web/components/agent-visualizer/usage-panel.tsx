@@ -7,7 +7,7 @@ import { sessionUsage, formatApiCost } from '@/lib/usage'
 import { stopPropagationHandlers } from './shared-ui'
 import { CostHistoryChart } from './cost-history-chart'
 
-export function UsagePanel({ visible, agents, sessionId, onClose, initialComparisonDay, sessionLabel }: { visible: boolean; agents: Map<string, Agent>; sessionId: string | null; onClose: () => void; initialComparisonDay?: string; sessionLabel?: string }) {
+export function UsagePanel({ visible, agents, sessionId, onClose, onBack, initialComparisonDay, initialView, sessionLabel }: { visible: boolean; agents: Map<string, Agent>; sessionId: string | null; onClose: () => void; onBack?: () => void; initialComparisonDay?: string; initialView?: 'spend' | 'burn' | 'compare'; sessionLabel?: string }) {
   const panelRef = useRef<HTMLElement>(null)
   useEffect(() => {
     if (!visible) return
@@ -42,12 +42,14 @@ export function UsagePanel({ visible, agents, sessionId, onClose, initialCompari
     }}
     className="branchline-cost-panel shadow-xl">
     <div className="sticky top-0 z-10 flex items-center justify-between gap-2 bg-slate-900 pb-2">
+      {onBack && <button type="button" aria-label="Back to all costs" onClick={onBack}
+        className="flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded border border-slate-600 text-lg">←</button>}
       <h2 className="min-w-0 truncate text-lg font-semibold" title={sessionLabel}>{sessionLabel ? `Costs · ${sessionLabel}` : 'Costs'}</h2>
       <button type="button" aria-label="Close API costs" onClick={onClose}
         className="flex min-h-11 min-w-11 items-center justify-center rounded border"
         style={{ borderColor: '#475569' }}>✕</button>
     </div>
-    <CostHistoryChart key={sessionId ?? 'none'} sessionId={sessionId} initialComparisonDay={initialComparisonDay} />
+    <CostHistoryChart key={sessionId ?? 'none'} sessionId={sessionId} initialComparisonDay={initialComparisonDay} initialView={initialView} />
     {usage && <details className="mt-4 border-t border-slate-700 pt-1 text-sm">
     <summary className="min-h-11 cursor-pointer content-center text-slate-300">Session totals</summary>
     <p className="mt-1 text-slate-300">{formatApiCost(usage)} · main + subagents</p>

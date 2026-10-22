@@ -1,7 +1,7 @@
 // Branchline fork modifications; see FORK.md.
 "use client"
 
-import { memo, useLayoutEffect, useRef } from "react"
+import { memo, useLayoutEffect, useRef, type RefObject } from "react"
 import { Z } from "@/lib/agent-types"
 import { COLORS } from "@/lib/colors"
 import { formatTokens } from "@/lib/utils"
@@ -90,6 +90,8 @@ export interface TopBarProps {
   sessionsWithActivity: Set<string>
   onSelectSession: (id: string, saved?: SessionInfo) => void
   onCloseSession: (id: string) => void
+  onOpenAllCosts: () => void
+  allCostsTriggerRef: RefObject<HTMLButtonElement | null>
   // Connection
   isVSCode: boolean
   connectionStatus: ConnectionStatus
@@ -110,7 +112,7 @@ export interface TopBarProps {
 export const TopBar = memo(function TopBar({
   viewMode, onChangeViewMode, onHeightChange,
   sessions, selectedSessionId, sessionsWithActivity,
-  onSelectSession, onCloseSession,
+  onSelectSession, onCloseSession, onOpenAllCosts, allCostsTriggerRef,
   isVSCode, connectionStatus,
   agentCount, usage,
   showFileAttention, showTranscript, showCostOverlay, showTimeline, isMuted,
@@ -137,7 +139,8 @@ export const TopBar = memo(function TopBar({
       style={{ zIndex: Z.info, background: '#0f172a', borderColor: '#475569', color: '#e2e8f0' }}
     >
       {/* Main-session button opens the grouped session browser. */}
-        <div className="min-w-0 w-full">
+        <div className="flex w-full min-w-0 items-stretch gap-2">
+          <div className="min-w-0 flex-1">
           <SessionTabs
             sessions={sessions}
             selectedSessionId={selectedSessionId}
@@ -146,6 +149,11 @@ export const TopBar = memo(function TopBar({
             onCloseSession={onCloseSession}
             allowHistory={!isVSCode}
           />
+          </div>
+          {!isVSCode && <button ref={allCostsTriggerRef} type="button" aria-label="All session costs" onClick={onOpenAllCosts}
+            className="min-h-11 min-w-14 shrink-0 rounded-lg border border-cyan-700 bg-cyan-950 px-2 py-2 text-xs leading-4 text-cyan-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300">
+            All<br />costs
+          </button>}
         </div>
 
       <div className="flex min-w-0 flex-wrap items-center gap-2 sm:gap-4">
