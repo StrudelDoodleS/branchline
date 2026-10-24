@@ -158,7 +158,7 @@ async def main():
                 sid='phone-primary';now=int(time.time()*1000)
                 events=[dict(type='agent_spawn',payload=dict(name='Orchestrator',isMain=True),time=0,sessionId=sid,eventId=1,streamId='spend-fixture')]
                 stream=''.join('data: '+json.dumps(packet)+'\n\n' for packet in [dict(type='session-list',sessions=[dict(id=sid,label='Current session',status='active',startTime=now,lastActivityTime=now)]),dict(type='agent-event-batch',events=events)])
-                await page.route('**/events',lambda r:r.fulfill(status=200,content_type='text/event-stream',body=stream))
+                await page.route('**/events*',lambda r:r.fulfill(status=200,content_type='text/event-stream',body=stream))
                 await page.route('**/session-events?*',lambda r:r.fulfill(status=200,content_type='application/json',body=json.dumps(dict(streamId='spend-fixture',throughEventId=0,events=[]))))
                 await page.route('**/session-cost-history?*',lambda r:r.fulfill(status=200,content_type='application/json',body=json.dumps(dict(sessionId='saved-claude',history=dict(points=[dict(timestamp=now-1000,costUSD=90)],totalCostUSD=90,untimedCostUSD=0,unpricedResponses=0,groups=[])))))
                 try:

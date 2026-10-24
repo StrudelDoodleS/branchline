@@ -55,6 +55,8 @@ interface WatchedCodexSession {
   lastActivityTime: number
   sessionDetected: boolean
   sessionCompleted: boolean
+  /** Native turn lifecycle, when recorded; quiet running turns are still work. */
+  taskActive?: boolean
   label: string
   savedTitle?: string
   rolloutState: CodexRolloutState
@@ -554,6 +556,7 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
     } else if (existingRoot && !groupWasActive && !inactiveHistory) {
       this._onSessionLifecycle.fire({ type: 'started', sessionId: existingRoot.sessionId, label: existingRoot.label })
     }
+    if (session.sessionCompleted && !restoring) this.emitCompletedSubtree(session)
 
     try {
       session.fileWatcher = fs.watch(filePath, () => this.readNewLines(sessionId))
@@ -586,26 +589,64 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
     if (!result) return
     session.fileSize = result.newSize
     session.fileTail = result.tail
-    if (!restoring) session.lastActivityTime = Date.now()
-
-    // Re-activate if the session had been marked complete on inactivity —
-    // new content means the user resumed the Codex CLI.
-    if (session.sessionCompleted && !restoring) {
-      const root = this.rootSession(sessionId)!
-      const groupWasActive = this.groupIsActive(root.sessionId)
-      session.sessionCompleted = false
-      this.reviveInactiveAncestors(session)
-      this.emitSpawn(session)
-      if (!groupWasActive) this._onSessionLifecycle.fire({ type: 'started', sessionId: root.sessionId, label: root.label })
-      log.info(`Session ${sessionId.slice(0, SESSION_ID_DISPLAY)} re-activated after idle`)
-    }
-
+    let hasActivity = false
     for (const line of result.lines) {
-      try { session.parser.processLine(line, session.rolloutState) }
+      try {
+        const record = JSON.parse(line) as { type?: string; payload?: { type?: string; role?: string } }
+        const terminal = record.type === 'event_msg' && (record.payload?.type === 'task_complete' || record.payload?.type === 'turn_aborted')
+        const started = record.type === 'event_msg' && record.payload?.type === 'task_started'
+        if (started) session.taskActive = true
+        if (terminal) session.taskActive = false
+        // Counters, titles, session metadata and duplicate lifecycle mirrors
+        // can arrive after completion. Only turn work can revive the session.
+        const work = started || session.taskActive !== false && (
+          record.type === 'response_item' && record.payload?.role !== 'system' && record.payload?.role !== 'developer'
+          || record.type === 'compacted'
+          || record.type === 'event_msg' && record.payload?.type === 'agent_reasoning'
+          || session.taskActive === undefined && (record.type === 'token_usage_record'
+            || record.type === 'event_msg' && record.payload?.type === 'token_count'))
+        if (work || terminal) hasActivity = true
+        if (work && session.sessionCompleted && !restoring) {
+          const root = this.rootSession(sessionId)!
+          const groupWasActive = this.groupIsActive(root.sessionId)
+          session.sessionCompleted = false
+          this.reviveInactiveAncestors(session)
+          this.emitSpawn(session)
+          if (!groupWasActive) this._onSessionLifecycle.fire({ type: 'started', sessionId: root.sessionId, label: root.label })
+        }
+        session.parser.processLine(line, session.rolloutState)
+        if (terminal) session.rolloutState.pendingToolCalls.clear()
+      }
       catch (err) { log.debug('Parser threw on line:', err) }
     }
+    if (hasActivity && !restoring) session.lastActivityTime = Date.now()
+    if (session.taskActive === false) this.completeSession(session)
+    else if (hasActivity && !restoring) this.resetInactivityTimer(sessionId)
+  }
 
-    if (!restoring) this.resetInactivityTimer(sessionId)
+  private completeSession(session: WatchedCodexSession): void {
+    if (session.sessionCompleted) return
+    session.sessionCompleted = true
+    if (session.inactivityTimer) clearTimeout(session.inactivityTimer)
+    if (session.sessionDetected) this.emitCompletedSubtree(session)
+  }
+
+  private emitCompletedSubtree(session: WatchedCodexSession): void {
+    const root = this.rootSession(session.sessionId)!
+    let current: WatchedCodexSession | undefined = session
+    const seen = new Set<string>()
+    while (current && !seen.has(current.sessionId) && !this.subtreeIsActive(current.sessionId)) {
+      seen.add(current.sessionId)
+      this.emitForSession(current.sessionId, {
+        time: (Date.now() - current.sessionStartTime) / 1000,
+        type: 'agent_complete',
+        payload: { name: ORCHESTRATOR_NAME, sessionEnd: true },
+      })
+      current = current.parentId ? this.sessions.get(current.parentId) : undefined
+    }
+    if (!this.groupIsActive(root.sessionId)) {
+      this._onSessionLifecycle.fire({ type: 'ended', sessionId: root.sessionId, label: root.label })
+    }
   }
 
   private resetInactivityTimer(sessionId: string): void {
@@ -614,22 +655,8 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
     if (session.inactivityTimer) { clearTimeout(session.inactivityTimer) }
     session.inactivityTimer = setTimeout(() => {
       if (session.sessionCompleted) return
-      session.sessionCompleted = true
-      const root = this.rootSession(sessionId)!
-      let current: WatchedCodexSession | undefined = session
-      const seen = new Set<string>()
-      while (current && !seen.has(current.sessionId) && !this.subtreeIsActive(current.sessionId)) {
-        seen.add(current.sessionId)
-        this.emitForSession(current.sessionId, {
-          time: (Date.now() - current.sessionStartTime) / 1000,
-          type: 'agent_complete',
-          payload: { name: ORCHESTRATOR_NAME, sessionEnd: true },
-        })
-        current = current.parentId ? this.sessions.get(current.parentId) : undefined
-      }
-      if (!this.groupIsActive(root.sessionId)) {
-        this._onSessionLifecycle.fire({ type: 'ended', sessionId: root.sessionId, label: root.label })
-      }
+      if (session.taskActive || session.rolloutState.pendingToolCalls.size > 0) return
+      this.completeSession(session)
     }, INACTIVITY_TIMEOUT_MS)
   }
 

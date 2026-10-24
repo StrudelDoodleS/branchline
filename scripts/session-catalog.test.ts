@@ -44,6 +44,27 @@ const enteredReview = { type: 'event_msg', timestamp: stamp(0), payload: { type:
 } } }
 const reviewAction = '<user_action>\n<context>User initiated a review task.</context>\n<action>review</action>\n<results>No findings.</results>\n</user_action>'
 
+test('remote native Claude names survive closure and refresh without changing session activity', async t => {
+  const f = await fixture(t)
+  await f.write(f.claude(rootId), [
+    { type: 'user', timestamp: stamp(1), cwd: '/work/project', message: { role: 'user', content: 'Opening request' } },
+    { type: 'custom-title', customTitle: 'Older transcript name' },
+  ])
+  const names = new Map([[rootId, 'Credibility transformer for GAMs']])
+  const catalog = new SessionCatalog({ ...f.options,
+    claudeMetadata: { getTitle: id => names.get(id) },
+  })
+  const [before] = await catalog.list()
+  assert.equal(before.label, 'Credibility transformer for GAMs')
+  assert.equal(before.historical, true)
+  assert.equal(before.status, 'completed')
+  names.set(rootId, 'Renamed in the Claude app')
+  const [after] = await catalog.list(true)
+  assert.equal(after.label, 'Renamed in the Claude app')
+  assert.equal(after.startTime, before.startTime)
+  assert.equal(after.lastActivityTime, before.lastActivityTime)
+})
+
 test('preserves ordinary user_action prompts and saved titles while rejecting truncated review envelopes', async t => {
   const f = await fixture(t)
   const text = '<user_action>Implement a profile menu</user_action>'

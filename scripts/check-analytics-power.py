@@ -79,7 +79,7 @@ class Fixture:
         sessions = [dict(id=SID, label='Analytics power', status='active', startTime=NOW, lastActivityTime=NOW)]
         events = [dict(type='agent_spawn', payload=dict(name='Orchestrator', isMain=True, runtime='claude'), time=0, sessionId=SID, eventId=1, streamId=SID)]
         stream = ''.join('data: '+json.dumps(packet)+'\n\n' for packet in [dict(type='session-list', sessions=sessions), dict(type='agent-event-batch', events=events)])
-        await page.route('**/events', lambda r: r.fulfill(status=200, content_type='text/event-stream', body=stream))
+        await page.route('**/events*', lambda r: r.fulfill(status=200, content_type='text/event-stream', body=stream))
         await page.route('**/session-events?*', lambda r: r.fulfill(status=200, content_type='application/json', body=json.dumps(dict(streamId=SID, throughEventId=1, events=events))))
         await page.route('**/session-cost-history?*', self.history)
         await page.route('**/spend-overview*', self.spend)

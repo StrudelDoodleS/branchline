@@ -40,6 +40,7 @@ export interface SessionInfo {
   provider?: string
   historical?: boolean
   project?: string
+  open?: boolean
 }
 
 // ─── Extension → Webview Messages ────────────────────────────────────────────

@@ -81,19 +81,36 @@ export function useVSCodeBridge(): BridgeHookResult {
   const replayFloorRef = useRef<Map<string, { streamId: string; throughEventId: number }>>(new Map())
   const replayInFlightRef = useRef<{ sessionId: string; request: number } | null>(null)
   const deferredStreamEventsRef = useRef<Map<string, SimulationEvent[]>>(new Map())
+  const replayAbortRef = useRef<AbortController | null>(null)
+  const replayTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const cancelSessionReplay = useCallback(() => {
+    replayRequestRef.current++
+    replayAbortRef.current?.abort()
+    replayAbortRef.current = null
+    if (replayTimeoutRef.current !== null) clearTimeout(replayTimeoutRef.current)
+    replayTimeoutRef.current = null
+    replayInFlightRef.current = null
+  }, [])
 
   const requestSessionReplay = useCallback(async (sessionId: string) => {
     if (vscodeBridge?.isVSCode || process.env.AGENT_FLOW_STANDALONE !== '1' && process.env.NODE_ENV !== 'development') return
-    const request = ++replayRequestRef.current
+    if (document.hidden) return
     const previous = replayInFlightRef.current
+    cancelSessionReplay()
+    const request = replayRequestRef.current
     if (previous && previous.sessionId !== sessionId) deferredStreamEventsRef.current.delete(previous.sessionId)
     replayInFlightRef.current = { sessionId, request }
+    const controller = new AbortController()
+    replayAbortRef.current = controller
+    const timeout = setTimeout(() => controller.abort(), 15000)
+    replayTimeoutRef.current = timeout
     setLoadingSessionId(sessionId)
     setReplayError(null)
     try {
       const relayPort = process.env.NEXT_PUBLIC_RELAY_PORT || ''
       const origin = relayPort ? `http://127.0.0.1:${relayPort}` : ''
-      const response = await fetch(`${origin}/session-events?sessionId=${encodeURIComponent(sessionId)}`, { cache: 'no-store' })
+      const response = await fetch(`${origin}/session-events?sessionId=${encodeURIComponent(sessionId)}`, { cache: 'no-store', signal: controller.signal })
       if (!response.ok) throw new Error('Could not load this session’s recent activity.')
       const replay = await response.json() as { events: AgentEvent[]; throughEventId: number; streamId: string }
       if (request !== replayRequestRef.current || selectedSessionIdRef.current !== sessionId) return
@@ -116,16 +133,20 @@ export function useVSCodeBridge(): BridgeHookResult {
       setSessionReplayVersion(version => version + 1)
     } catch (error) {
       if (request === replayRequestRef.current && selectedSessionIdRef.current === sessionId) {
-        setReplayError(error instanceof Error ? error.message : 'Could not refresh session activity.')
+        setReplayError(controller.signal.aborted ? 'Session activity timed out. Check the connection and retry.'
+          : error instanceof Error ? error.message : 'Could not refresh session activity.')
       }
     } finally {
+      clearTimeout(timeout)
       if (request === replayRequestRef.current) {
+        replayAbortRef.current = null
+        replayTimeoutRef.current = null
         replayInFlightRef.current = null
         deferredStreamEventsRef.current.delete(sessionId)
         setLoadingSessionId(null)
       }
     }
-  }, [])
+  }, [cancelSessionReplay])
 
   // Connect to standalone dev relay server via SSE when not in VS Code
   useEffect(() => {
@@ -141,27 +162,50 @@ export function useVSCodeBridge(): BridgeHookResult {
     if (!isStandalone && (process.env.NODE_ENV !== 'development' || process.env.NEXT_PUBLIC_DEMO !== '0')) return
 
     const relayPort = process.env.NEXT_PUBLIC_RELAY_PORT || ''
-    const es = new EventSource(relayPort ? `http://127.0.0.1:${relayPort}/events` : '/events')
-
-    es.onopen = () => {
-      setConnectionStatus('connected')
-      setUseMockData(false)
-      if (selectedSessionIdRef.current) void requestSessionReplay(selectedSessionIdRef.current)
+    const url = relayPort ? `http://127.0.0.1:${relayPort}/events?replay=0` : '/events?replay=0'
+    let es: EventSource | null = null
+    const disconnect = () => {
+      const previous = es
+      es = null
+      previous?.close()
+      cancelSessionReplay()
     }
-    es.onmessage = (e) => {
-      try {
-        const data = JSON.parse(e.data)
-        window.postMessage(data, '*')
-      } catch {}
-    }
-    es.onerror = () => {
+    const suspend = () => {
+      disconnect()
+      setLoadingSessionId(null)
       setConnectionStatus('disconnected')
     }
+    const connect = () => {
+      if (es || document.hidden) return
+      const current = new EventSource(url)
+      es = current
+      current.onopen = () => {
+        if (es !== current) return
+        setConnectionStatus('connected')
+        setUseMockData(false)
+        if (selectedSessionIdRef.current) void requestSessionReplay(selectedSessionIdRef.current)
+      }
+      current.onmessage = (event) => {
+        if (es !== current || document.hidden) return
+        try { window.postMessage(JSON.parse(event.data), '*') } catch { /* Ignore incomplete messages. */ }
+      }
+      current.onerror = () => { if (es === current) setConnectionStatus('disconnected') }
+    }
+    const visibility = () => { if (document.hidden) suspend(); else connect() }
+    // Close synchronously: mobile browsers can freeze a hidden tab before a
+    // passive React effect runs, leaving its HTTP/1 connection occupied.
+    document.addEventListener('visibilitychange', visibility)
+    window.addEventListener('pagehide', suspend)
+    window.addEventListener('pageshow', visibility)
+    connect()
 
     return () => {
-      es.close()
+      document.removeEventListener('visibilitychange', visibility)
+      window.removeEventListener('pagehide', suspend)
+      window.removeEventListener('pageshow', visibility)
+      disconnect()
     }
-  }, [requestSessionReplay])
+  }, [requestSessionReplay, cancelSessionReplay])
 
   useEffect(() => {
     const bridge = vscodeBridge
@@ -274,7 +318,7 @@ export function useVSCodeBridge(): BridgeHookResult {
         replayFloorRef.current.clear()
         replayInFlightRef.current = null
         deferredStreamEventsRef.current.clear()
-        replayRequestRef.current++
+        cancelSessionReplay()
         setLoadingSessionId(null)
         setReplayError(null)
         sessionSwitchPendingRef.current = true
@@ -313,7 +357,7 @@ export function useVSCodeBridge(): BridgeHookResult {
           if (existing) {
             // Session resumed after inactivity — mark active again
             return prev.map(s => s.id === session.id
-              ? { ...s, ...session, historical: false, status: 'active' as const, lastActivityTime: session.lastActivityTime }
+              ? { ...s, ...session, historical: false, lastActivityTime: Math.max(s.lastActivityTime, session.lastActivityTime) }
               : s)
           }
           return [...prev, session]
@@ -374,7 +418,7 @@ export function useVSCodeBridge(): BridgeHookResult {
       unsubConfig()
       unsubSession()
     }
-  }, [requestSessionReplay])
+  }, [requestSessionReplay, cancelSessionReplay])
 
   const consumeEvents = useCallback(() => {
     // Clear in-place so stale closures in animation callbacks
@@ -407,8 +451,11 @@ export function useVSCodeBridge(): BridgeHookResult {
         next.delete(sessionId)
         return next
       })
+    } else {
+      cancelSessionReplay()
+      setLoadingSessionId(null)
     }
-  }, [requestSessionReplay, replayError])
+  }, [requestSessionReplay, replayError, cancelSessionReplay])
 
   /** Flush buffered events for the selected session into pending.
    *  Must be called from useLayoutEffect AFTER simulation state is saved/swapped. */

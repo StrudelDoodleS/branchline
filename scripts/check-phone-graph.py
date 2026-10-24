@@ -255,7 +255,7 @@ async def main():
                                        time=0, sessionId='graph-second', eventId=5, streamId='graph-fixture'))
                 packets = [dict(type='session-list', sessions=sessions), dict(type='agent-event-batch', events=events)]
                 stream = ''.join('data: ' + json.dumps(packet) + '\n\n' for packet in packets)
-                await page.route('**/events', lambda route: route.fulfill(status=200, content_type='text/event-stream', body=stream))
+                await page.route('**/events*', lambda route: route.fulfill(status=200, content_type='text/event-stream', body=stream))
                 async def replay(route):
                     session_id = parse_qs(urlparse(route.request.url).query)['sessionId'][0]
                     selected = [event for event in events if event['sessionId'] == session_id]

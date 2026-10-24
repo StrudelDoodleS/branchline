@@ -10,20 +10,23 @@ import * as path from 'path'
 import * as os from 'os'
 
 import { HookServer } from '../extension/src/hook-server'
-import { AgentEvent, SessionInfo, WatchedSession, modelSettingsFields } from '../extension/src/protocol'
+import { AgentEvent, SessionInfo, WatchedSession, TranscriptEntry, modelSettingsFields } from '../extension/src/protocol'
 import { TranscriptParser } from '../extension/src/transcript-parser'
 import { readNewFileLines, foldPathCase } from '../extension/src/fs-utils'
 import { scanSubagentsDir, readSubagentNewLines } from '../extension/src/subagent-watcher'
 import { handlePermissionDetection } from '../extension/src/permission-detection'
 import { CodexSessionWatcher } from '../extension/src/codex-session-watcher'
 import {
-  INACTIVITY_TIMEOUT_MS, SCAN_INTERVAL_MS, ACTIVE_SESSION_AGE_S, POLL_FALLBACK_MS,
+  INACTIVITY_TIMEOUT_MS, SCAN_INTERVAL_MS, POLL_FALLBACK_MS,
   SESSION_ID_DISPLAY, SYSTEM_PROMPT_BASE_TOKENS, ORCHESTRATOR_NAME,
   HOOK_SERVER_NOT_STARTED, WORKSPACE_HASH_LENGTH,
 } from '../extension/src/constants'
 import { setLogLevel } from '../extension/src/logger'
 import type { TelemetryClient } from './telemetry'
 import { SessionReplayStore } from './session-replay'
+import { sendJson } from './http-json'
+import { ClaudeSessionMetadataReader } from '../extension/src/claude-session-metadata'
+import { claudeSessionInfo, shouldWatchClaudeSession, shouldCompleteClaudeSession } from '../extension/src/claude-session-info'
 import { claudeContextPayload } from '../extension/src/claude-context'
 import { buildCostHistory, normalizeCostHistoryOptions } from '../extension/src/token-usage'
 import { SessionCatalog } from './session-catalog'
@@ -100,6 +103,9 @@ function broadcastEvent(event: AgentEvent) {
 }
 
 function broadcastSessionLifecycle(type: 'started' | 'ended' | 'updated', sessionId: string, label: string, runtime: 'claude' | 'codex' = 'claude', details?: SessionInfo) {
+  const state = runtime === 'claude' ? sessions.get(sessionId) : undefined
+  if (state && !details) details = claudeSessionInfo(state, sessionMetadata.get(sessionId))
+  if (runtime === 'claude' && details) metadataStates.set(sessionId, JSON.stringify([details.label, details.status, details.open]))
   if (type === 'started') {
     broadcast(JSON.stringify({
       type: 'session-started',
@@ -117,6 +123,8 @@ function broadcastSessionLifecycle(type: 'started' | 'ended' | 'updated', sessio
 // ─── Session watcher ────────────────────────────────────────────────────────
 
 const sessions = new Map<string, WatchedSession>()
+const sessionMetadata = new ClaudeSessionMetadataReader()
+const metadataStates = new Map<string, string>()
 
 function elapsed(sessionId?: string): number {
   if (sessionId) {
@@ -140,6 +148,7 @@ function emitEvent(event: AgentEvent, sessionId?: string) {
 }
 
 const parser = new TranscriptParser({
+  sessionMetadata,
   emit: emitEvent,
   elapsed,
   getSession: (sessionId: string) => sessions.get(sessionId),
@@ -176,20 +185,25 @@ function resetInactivityTimer(sessionId: string, activityTime = Date.now()) {
   if (session.inactivityTimer) clearTimeout(session.inactivityTimer)
   session.inactivityTimer = setTimeout(() => {
     if (!session.sessionCompleted && session.sessionDetected) {
+      const native = sessionMetadata.get(sessionId)
+      if (native?.nativeStatus === 'busy' || native?.nativeStatus === 'shell') return
+      if ([...session.pendingToolCalls.values()].some(tool => tool.name !== 'Agent' && tool.name !== 'Task')) return
       // Subagent turn boundaries, rather than a quiet tool, determine when
       // child work is done. Main completion would otherwise hide them too.
       if ([...session.subagentWatchers.values()].some(sub => sub.spawnEmitted && !sub.completed)) return
       log(`[session] ${sessionId.slice(0, SESSION_ID_DISPLAY)} inactive`)
-      session.sessionCompleted = true
-      broadcastEvent({
-        time: elapsed(sessionId),
-        type: 'agent_complete',
-        payload: { name: ORCHESTRATOR_NAME },
-        sessionId,
-      })
-      broadcastSessionLifecycle('ended', sessionId, session.label)
+      completeSession(session)
     }
   }, INACTIVITY_TIMEOUT_MS)
+}
+
+function completeSession(session: WatchedSession): void {
+  if (session.sessionCompleted || !session.sessionDetected) return
+  session.sessionCompleted = true
+  if (session.inactivityTimer) clearTimeout(session.inactivityTimer)
+  session.inactivityTimer = null
+  broadcastEvent({ time: elapsed(session.sessionId), type: 'agent_complete', payload: { name: ORCHESTRATOR_NAME }, sessionId: session.sessionId })
+  broadcastSessionLifecycle('ended', session.sessionId, session.label)
 }
 
 function watchSession(sessionId: string, filePath: string) {
@@ -218,6 +232,7 @@ function watchSession(sessionId: string, filePath: string) {
   sessions.set(sessionId, session)
 
   const catchUpEntries = parser.prescanExistingContent(filePath, stat.size, session)
+  clearFinishedMainTools(session, catchUpEntries.at(-1))
   session.fileSize = stat.size
   parser.extractSessionLabel(catchUpEntries, session)
 
@@ -255,6 +270,35 @@ function watchSession(sessionId: string, filePath: string) {
   log(`[session] Watching ${sessionId.slice(0, SESSION_ID_DISPLAY)} — "${session.label}"`)
 }
 
+function clearFinishedMainTools(session: WatchedSession, entry?: TranscriptEntry): void {
+  if (!entry?.message) return
+  const content = entry.message.content
+  const text = typeof content === 'string' ? content : Array.isArray(content)
+    ? content.filter(block => block.type === 'text').map(block => 'text' in block ? String(block.text ?? '') : '').join('\n') : ''
+  const finished = entry.type === 'assistant' && ['end_turn', 'stop_sequence'].includes(entry.message.stop_reason ?? '')
+    || entry.type === 'user' && /^\[Request interrupted by user(?: for tool use)?\]$/.test(text.trim())
+  if (!finished) return
+  session.pendingToolCalls.clear()
+  if (session.permissionTimer) clearTimeout(session.permissionTimer)
+  session.permissionTimer = null
+  session.permissionEmitted = false
+}
+
+function refreshSessionMetadata(): void {
+  const live = new Map(sessionMetadata.listLive().map(record => [record.sessionId, record]))
+  for (const session of sessions.values()) {
+    parser.refreshSessionTitle(session)
+    const previous = metadataStates.get(session.sessionId)
+    const native = live.get(session.sessionId)
+    if (shouldCompleteClaudeSession(session, native)) completeSession(session)
+    const info = claudeSessionInfo(session, native)
+    const signature = JSON.stringify([info.label, info.status, info.open])
+    if (previous === signature) continue
+    metadataStates.set(session.sessionId, signature)
+    if (session.sessionDetected) broadcastSessionLifecycle('updated', session.sessionId, info.label, 'claude', info)
+  }
+}
+
 function readNewLines(sessionId: string) {
   const session = sessions.get(sessionId)
   if (!session) return
@@ -267,6 +311,7 @@ function readNewLines(sessionId: string) {
   let hasActivity = false
   for (const line of result.lines) {
     const kind = parser.processTranscriptLine(line, ORCHESTRATOR_NAME, session.pendingToolCalls, session.seenToolUseIds, sessionId, session.seenMessageHashes)
+    try { clearFinishedMainTools(session, JSON.parse(line)) } catch { /* Partial append. */ }
     if (kind !== 'session-title') hasActivity = true
   }
   if (!hasActivity) return
@@ -279,7 +324,9 @@ function readNewLines(sessionId: string) {
 // ─── Session scanner ────────────────────────────────────────────────────────
 
 function scanForActiveSessions(workspace: string) {
+  void sessionMetadata.refresh().then(refreshSessionMetadata)
   if (!fs.existsSync(CLAUDE_DIR)) return
+  const live = new Map(sessionMetadata.listLive().map(record => [record.sessionId, record]))
 
   let resolved = workspace
   try { resolved = fs.realpathSync(resolved) } catch {}
@@ -323,8 +370,7 @@ function scanForActiveSessions(workspace: string) {
           }
         } catch {}
 
-        const ageSeconds = (Date.now() - newestMtime) / 1000
-        if (ageSeconds <= ACTIVE_SESSION_AGE_S && !sessions.has(sessionId)) {
+        if (!sessions.has(sessionId) && shouldWatchClaudeSession(newestMtime, dirPath, live.get(sessionId))) {
           watchSession(sessionId, filePath)
         }
       }
@@ -404,7 +450,9 @@ export async function createRelay(options: RelayOptions): Promise<Relay> {
   const mode = resolveRuntimeMode(options.runtime)
   const wantClaude = mode === 'claude' || mode === 'auto'
   const wantCodex = mode === 'codex' || mode === 'auto'
-  const sessionCatalog = new SessionCatalog({ includeClaude: wantClaude, includeCodex: wantCodex })
+  if (wantClaude) await sessionMetadata.refresh()
+  const sessionCatalog = new SessionCatalog({ includeClaude: wantClaude, includeCodex: wantCodex,
+    claudeMetadata: wantClaude ? sessionMetadata : undefined })
   const spendIndex = new SpendIndex(sessionCatalog)
   log(`[relay] Runtime mode: ${mode} (watching: ${[wantClaude && 'claude', wantCodex && 'codex'].filter(Boolean).join(', ')})`)
 
@@ -494,6 +542,7 @@ export async function createRelay(options: RelayOptions): Promise<Relay> {
         'Cache-Control': 'no-cache',
         'Connection': 'keep-alive',
       })
+      res.flushHeaders()
 
       sseClients.add(res)
       log(`[sse] Client connected (${sseClients.size} total)`)
@@ -505,19 +554,16 @@ export async function createRelay(options: RelayOptions): Promise<Relay> {
 
       // Send current session list (Claude + Codex)
       const sessionList: SessionInfo[] = []
+      const native = new Map(sessionMetadata.listLive().map(record => [record.sessionId, record]))
       for (const session of sessions.values()) {
         if (!session.sessionDetected) continue
-        sessionList.push({
-          id: session.sessionId, label: session.label,
-          status: session.sessionCompleted ? 'completed' : 'active',
-          startTime: session.sessionStartTime, lastActivityTime: session.lastActivityTime,
-          runtime: 'claude', provider: 'anthropic',
-        })
+        sessionList.push(claudeSessionInfo(session, native.get(session.sessionId)))
       }
       if (codexWatcher) sessionList.push(...codexWatcher.getActiveSessions())
-      if (sessionList.length > 0) {
-        sendSSE(res, { type: 'session-list', sessions: sessionList })
-      }
+      sendSSE(res, { type: 'session-list', sessions: sessionList })
+
+      // Clients restoring via /session-events only need new events here.
+      if (new URL(req.url ?? '/', 'http://127.0.0.1').searchParams.get('replay') === '0') return
 
       // Replay buffered events for the most recent active session
       const sorted = [...sessionList].sort((a, b) => b.lastActivityTime - a.lastActivityTime)
@@ -535,10 +581,10 @@ export async function createRelay(options: RelayOptions): Promise<Relay> {
         const replay = sessionId ? eventBuffer.get(sessionId) : undefined
         // Saved usage can be inspected without inventing an agent activity replay.
         const saved = !replay && sessionId && (await sessionCatalog.list()).some(session => session.id === sessionId)
-        res.writeHead(replay || saved ? 200 : 404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-        res.end(JSON.stringify(replay ?? (saved ? { streamId: `saved-${sessionId}`, throughEventId: 0, events: [] } : { error: 'Session history is unavailable' })))
+        await sendJson(req, res, replay || saved ? 200 : 404,
+          replay ?? (saved ? { streamId: `saved-${sessionId}`, throughEventId: 0, events: [] } : { error: 'Session history is unavailable' }))
       } catch {
-        res.writeHead(500, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify({ error: 'Session history is unavailable' }))
+        await sendJson(req, res, 500, { error: 'Session history is unavailable' })
       }
     },
 

@@ -2,6 +2,7 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { isCodexReviewAction } from './codex-session-metadata'
+import type { ClaudeSessionMetadataReader } from './claude-session-metadata'
 
 export const sessionTitle = (value: unknown): string | undefined =>
   typeof value === 'string' && value.trim() ? value.trim().replace(/\s+/g, ' ').slice(0, 180) : undefined
@@ -22,6 +23,7 @@ export function preferClaudeTitle(current: ClaudeSessionTitle | undefined, next:
  * Stat signatures avoid re-reading unchanged indexes on the watcher fallback. */
 export class SessionTitleReader {
   private files = new Map<string, { signature: string; titles: Map<string, string> }>()
+  constructor(private readonly native?: Pick<ClaudeSessionMetadataReader, 'getTitle'>) {}
 
   private read(file: string, parse: (text: string) => Map<string, string>): Map<string, string> {
     try {
@@ -39,6 +41,8 @@ export class SessionTitleReader {
   }
 
   claude(transcript: string): string | undefined {
+    const native = this.native?.getTitle(path.basename(transcript, '.jsonl'))
+    if (native) return native
     const file = path.join(path.dirname(transcript), path.basename(transcript, '.jsonl'), 'custom-title.json')
     return this.read(file, text => {
       const title = sessionTitle(JSON.parse(text)?.customTitle)

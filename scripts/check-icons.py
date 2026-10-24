@@ -21,7 +21,7 @@ async def main():
             page.set_default_timeout(3000)
             errors = []
             page.on('pageerror', lambda error: errors.append(str(error)))
-            await page.route('**/events', lambda route: route.fulfill(status=200, content_type='text/event-stream',
+            await page.route('**/events*', lambda route: route.fulfill(status=200, content_type='text/event-stream',
                 body='data: {"type":"session-list","sessions":[]}\n\n'))
             response = await page.goto(base, wait_until='domcontentloaded')
             assert response and response.ok

@@ -18,6 +18,7 @@ Branchline is maintained by StrudelDoodleS and derives from Agent Flow by Simon 
 - Completing a reply leaves background subagents running under their own lifecycle; an explicit session end closes the full descendant tree.
 - Bounded replay history with retained agent identities, per-session snapshots, sequence waterlines, stream-aware live-event buffering, and explicit reset handling.
 - Codex saved session names and Claude manual/generated titles, including sidecar-only names and live renames; prompts are a fallback for unnamed sessions. Latest cache-inclusive Claude context usage per agent, replay-safe response tracking, and normalized context-bar/ring composition.
+- Claude app renames resolved through exact native local/remote session identities, with a private title-only cache. Verified recent open mains remain in Active between turns with a Waiting label; native work and completion boundaries prevent timer-driven Active/Recent jumps.
 - Cumulative API usage and per-request list-price estimates for main sessions and subagents, including cache categories, Codex compaction calls, replay deduplication, and completed-agent retention.
 - A touch-friendly cumulative cost history graph, using original response dates and loading only while the cost panel is open.
 - Dollar burn rate from raw response charges, with shared input/output/cache overlays, idle intervals, and Claude compaction iteration accounting.
@@ -33,6 +34,7 @@ Branchline is maintained by StrudelDoodleS and derives from Agent Flow by Simon 
 - Per-agent cost rows with input, output, cache-read and cache-write dollars and reported tokens. Selecting an agent filters Spend, Burn, daily comparisons and cache diagnostics; completed agents remain included, and equal names are distinguished by a short identifier.
 - A portable `branchline-monitor` skill and standard-library Python client for compact session, agent-cost, activity and spend queries. It preserves source limitations and unknown prices/cache writes, and documents reporting confirmed capability gaps to this fork.
 - Lower phone rendering load: covered graphs stop drawing, hidden pages pause animation and analytics polling, and the tree uses coarse ticks with correct elapsed time. Touch graphs use lighter bloom and 30 resting frames per second, with faster input rendering. Cached chart work and unchanged responses reduce redraws; compressed, validated static assets reduce downloads, and repeated cost aggregation reuses timezone labels.
+- Refresh recovery closes background-tab event streams, reconnects and resynchronizes on return, and gives stalled history requests a timeout and Retry. History loads once through a compressed snapshot while the event stream carries new updates; legacy stream replay remains compatible.
 - Root, extension, and browser regression coverage for these behaviors.
 - Separate Branchline package identities and branding; telemetry defaults off with no collector configured.
 - Browser favicons, Apple touch icons, Android shortcut icons with safe mask padding, and a phone-sized icon comparison page at `/icon-options.html`.
@@ -44,6 +46,8 @@ Modified source files carry a Branchline fork notice. Git history records their 
 Existing hook installations and configuration remain usable. The `AGENT_FLOW_*` environment variables, `agentVisualizer.*` command and setting identifiers, and `~/.claude/agent-flow/` and `~/.agent-flow/` paths are retained as technical compatibility identifiers.
 
 An existing deployment can keep its checkout path and service name. Build and install its assets through the existing deployment process; repository setup does not require moving session data or changing Claude authentication.
+
+Remote Claude titles use read-only metadata requests with the existing Claude login when available. Branchline does not refresh or change that login. Credentials stay on the server; the private name cache stores session IDs and titles, without activity or authentication data. Missing credentials or network access retain known names and use local fallbacks.
 
 Package versions reflect the upstream base; the repository and commit identify the fork. No npm or marketplace package is published by this repository setup.
 

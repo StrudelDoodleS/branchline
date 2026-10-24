@@ -12,6 +12,16 @@ test('recent session choices follow last activity even when an older session is 
   assert.deepEqual(Browser.browseSessions(sessions, {}, 1000).map(s => s.id), ['new idle', 'middle', 'old active'])
 })
 
+test('open main sessions stay in Active while waiting between turns; closed and historical sessions stay Recent', () => {
+  const now = Date.now()
+  const sessions = [session('waiting', now - 900000, { status: 'completed', historical: false, open: true }),
+    session('working', now, { status: 'active' }), session('closed', now, { status: 'completed', open: false }),
+    session('saved', now, { status: 'completed', historical: true, open: true })]
+  const groups = Browser.groupSessionsByActivity(sessions, now)
+  assert.deepEqual(groups.find(group => group.id === 'active')!.sessions.map(row => row.id), ['working', 'waiting'])
+  assert.deepEqual(groups.find(group => group.id === 'recent')!.sessions.map(row => row.id).sort(), ['closed', 'saved'])
+})
+
 test('provider and search filters use recorded metadata, with a distinct unknown provider', () => {
   assert.equal(typeof Browser.browseSessions, 'function')
   const sessions = [session('claude', 300, { label: 'Editor specification', provider: 'anthropic', project: 'superglm' }),

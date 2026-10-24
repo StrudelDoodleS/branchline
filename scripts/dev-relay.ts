@@ -33,7 +33,7 @@ async function main() {
       return
     }
 
-    if (req.url === '/events') {
+    if (req.url === '/events' || req.url?.startsWith('/events?')) {
       return relay.handleSSE(req, res)
     }
     if (req.method === 'GET' && req.url?.startsWith('/session-events?')) {

@@ -27,6 +27,7 @@ export interface SessionInfo {
   provider?: string
   historical?: boolean
   project?: string
+  open?: boolean
   kind?: 'review'
 }
 

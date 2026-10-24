@@ -1814,7 +1814,7 @@ async def main():
                     packets = [json.loads(line[6:]) for line in body.splitlines() if line.startswith('data: ')]
                     packets[1]['events'] = [event for event in packets[1]['events'] if event['sessionId'] == 'phone-primary']
                     body = ''.join('data: ' + json.dumps(packet) + '\n\n' for packet in packets)
-                await page.route("**/events", lambda route: route.fulfill(status=200, content_type="text/event-stream", body=body))
+                await page.route("**/events*", lambda route: route.fulfill(status=200, content_type="text/event-stream", body=body))
                 async def replay_route(route):
                     session_id = parse_qs(urlparse(route.request.url).query)['sessionId'][0]
                     packets = [json.loads(line[6:]) for line in recording().splitlines() if line.startswith('data: ')]

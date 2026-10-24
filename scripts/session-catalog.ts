@@ -9,8 +9,10 @@ import type { SessionInfo } from '../extension/src/protocol'
 import { claudeUsageCalls, normalizeClaudeUsage, UsageLedger, CodexUsageTracker, type CostRecord } from '../extension/src/token-usage'
 import { codexReviewLabel, codexSessionHierarchy, isCodexExecReview, isCodexReviewAction } from '../extension/src/codex-session-metadata'
 import { claudeSessionTitle, preferClaudeTitle, SessionTitleReader, type ClaudeSessionTitle } from '../extension/src/session-titles'
+import type { ClaudeSessionMetadataReader } from '../extension/src/claude-session-metadata'
 
 interface CatalogOptions {
+  claudeMetadata?: Pick<ClaudeSessionMetadataReader, 'getTitle'>
   claudeDir?: string
   codexDir?: string
   archivedCodexDir?: string
@@ -204,10 +206,10 @@ async function* jsonLines(file: string, strict = false): AsyncGenerator<Json> {
 
 /** Read-only historical catalog: no watcher, lifecycle event or inactivity clock. */
 export class SessionCatalog {
-  private readonly options: Required<CatalogOptions>
+  private readonly options: Required<Omit<CatalogOptions, 'claudeMetadata'>>
   private fileCache = new Map<string, { signature: string; metadata?: SavedFile }>()
   private titleCache?: { signature: string; titles: Map<string, string> }
-  private titleReader = new SessionTitleReader()
+  private titleReader: SessionTitleReader
   private groups = new Map<string, SessionGroup>()
   private listedAt = 0
   private listing?: Promise<SessionInfo[]>
@@ -216,6 +218,7 @@ export class SessionCatalog {
   private loading = new Map<string, { signature: string; promise: Promise<CostRecord[]> }>()
 
   constructor(options: CatalogOptions = {}) {
+    this.titleReader = new SessionTitleReader(options.claudeMetadata)
     const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex')
     this.options = {
       claudeDir: options.claudeDir ?? path.join(os.homedir(), '.claude', 'projects'),

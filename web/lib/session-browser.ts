@@ -37,7 +37,7 @@ export function groupSessionsByActivity(sessions: SessionInfo[], now = Date.now(
   for (const session of browseSessions(sessions, {}, now)) {
     const date = new Date(session.lastActivityTime)
     const id = session.kind === 'review' ? 'review-jobs'
-      : session.historical !== true && session.status === 'active' ? 'active'
+      : session.historical !== true && (session.status === 'active' || session.open === true) ? 'active'
       : session.lastActivityTime >= now - 86400000 ? 'recent'
       : `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
     if (!groups.has(id)) groups.set(id, [])

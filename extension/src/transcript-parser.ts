@@ -29,10 +29,12 @@ import { createLogger } from './logger'
 import { recordClaudeContext } from './claude-context'
 import { normalizeClaudeUsage, claudeUsageCalls, UsageLedger } from './token-usage'
 import { claudeSessionTitle, preferClaudeTitle, SessionTitleReader, type ClaudeSessionTitle } from './session-titles'
+import type { ClaudeSessionMetadataReader } from './claude-session-metadata'
 
 const log = createLogger('TranscriptParser')
 
 export interface TranscriptParserDelegate {
+  sessionMetadata?: Pick<ClaudeSessionMetadataReader, 'getTitle'>
   emit(event: AgentEvent, sessionId?: string): void
   elapsed(sessionId?: string): number
   getSession(sessionId: string): WatchedSession | undefined
@@ -134,7 +136,9 @@ export class TranscriptParser {
    *  Their tool_result only confirms the launch; the real finish arrives later. */
   private backgroundSubagents = new Map<string, { childName: string; parent: string; sessionId?: string }>()
 
-  constructor(private delegate: TranscriptParserDelegate) {}
+  constructor(private delegate: TranscriptParserDelegate) {
+    this.titleReader = new SessionTitleReader(delegate.sessionMetadata)
+  }
 
   /** Clean up state associated with a completed session to prevent unbounded Map growth.
    *  Pass the session's pending tool_use_ids so we can remove orphaned entries. */
@@ -703,7 +707,7 @@ export class TranscriptParser {
     }
   }
 
-  private readonly titleReader = new SessionTitleReader()
+  private readonly titleReader: SessionTitleReader
 
   private applySessionTitle(session: WatchedSession, next: ClaudeSessionTitle | undefined): boolean {
     const current = session.sessionTitleSource ? { label: session.label, source: session.sessionTitleSource } : undefined

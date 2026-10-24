@@ -3,9 +3,9 @@ import * as vscode from 'vscode'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
-import { AgentEvent, SessionInfo, WatchedSession, modelSettingsFields } from './protocol'
+import { AgentEvent, SessionInfo, WatchedSession, type TranscriptEntry, modelSettingsFields } from './protocol'
 import {
-  INACTIVITY_TIMEOUT_MS, SCAN_INTERVAL_MS, ACTIVE_SESSION_AGE_S, POLL_FALLBACK_MS,
+  INACTIVITY_TIMEOUT_MS, SCAN_INTERVAL_MS, POLL_FALLBACK_MS,
   SESSION_ID_DISPLAY, SYSTEM_PROMPT_BASE_TOKENS, ORCHESTRATOR_NAME,
 } from './constants'
 import type { AgentSessionWatcher, SessionLifecycleEvent } from './session-runtime'
@@ -16,6 +16,8 @@ import { scanSubagentsDir, readSubagentNewLines } from './subagent-watcher'
 import { createLogger } from './logger'
 import { claudeContextPayload } from './claude-context'
 import { buildCostHistory, type CostHistoryOptions } from './token-usage'
+import { ClaudeSessionMetadataReader } from './claude-session-metadata'
+import { claudeSessionInfo, shouldWatchClaudeSession, shouldCompleteClaudeSession } from './claude-session-info'
 
 const log = createLogger('SessionWatcher')
 
@@ -43,6 +45,8 @@ export type { WatchedSession, SubagentState } from './protocol'
 const CLAUDE_DIR = path.join(os.homedir(), '.claude', 'projects')
 
 export class SessionWatcher implements AgentSessionWatcher {
+  private readonly sessionMetadata = new ClaudeSessionMetadataReader()
+  private metadataStates = new Map<string, string>()
   private dirWatcher: fs.FSWatcher | null = null
   private dirWatchers = new Map<string, fs.FSWatcher>()
   private sessions = new Map<string, WatchedSession>()
@@ -58,6 +62,7 @@ export class SessionWatcher implements AgentSessionWatcher {
   private readonly _onSessionLifecycle = new vscode.EventEmitter<SessionLifecycleEvent>()
 
   private readonly parser: TranscriptParser = new TranscriptParser({
+    sessionMetadata: this.sessionMetadata,
     emit: (event, sessionId) => this.emit(event, sessionId),
     elapsed: (sessionId) => this.elapsed(sessionId),
     getSession: (sessionId) => this.sessions.get(sessionId),
@@ -81,7 +86,7 @@ export class SessionWatcher implements AgentSessionWatcher {
   /** Whether any session is actively being tailed */
   isActive(): boolean {
     for (const session of this.sessions.values()) {
-      if (session.sessionDetected) return true
+      if (session.sessionDetected && !session.sessionCompleted) return true
     }
     return false
   }
@@ -89,19 +94,13 @@ export class SessionWatcher implements AgentSessionWatcher {
   /** Whether a specific session is active */
   isSessionActive(sessionId: string): boolean {
     const session = this.sessions.get(sessionId)
-    return !!session && session.sessionDetected
+    return !!session && session.sessionDetected && !session.sessionCompleted
   }
 
   /** Get list of currently tracked sessions */
   getActiveSessions(): SessionInfo[] {
-    return Array.from(this.sessions.values()).map(s => ({
-      id: s.sessionId,
-      label: s.label,
-      status: s.sessionCompleted ? 'completed' : 'active',
-      startTime: s.sessionStartTime,
-      lastActivityTime: s.lastActivityTime,
-      runtime: 'claude', provider: 'anthropic',
-    }))
+    const live = new Map(this.sessionMetadata.listLive().map(record => [record.sessionId, record]))
+    return Array.from(this.sessions.values()).map(s => claudeSessionInfo(s, live.get(s.sessionId)))
   }
 
   getCostHistory(sessionId: string, options?: CostHistoryOptions) {
@@ -302,9 +301,11 @@ export class SessionWatcher implements AgentSessionWatcher {
   }
 
   private scanForActiveSessions(): void {
+    void this.sessionMetadata.refresh().then(() => this.refreshSessionMetadata())
     if (!fs.existsSync(CLAUDE_DIR)) {
       return
     }
+    const live = new Map(this.sessionMetadata.listLive().map(record => [record.sessionId, record]))
 
     try {
       const dirsToScan: string[] = []
@@ -363,8 +364,7 @@ export class SessionWatcher implements AgentSessionWatcher {
               }
             } catch { /* expected if subagents dir doesn't exist yet */ }
 
-            const ageSeconds = (Date.now() - newestMtime) / 1000
-            if (ageSeconds <= ACTIVE_SESSION_AGE_S) {
+            if (shouldWatchClaudeSession(newestMtime, projectPath, live.get(sessionId))) {
               activeFiles.push({
                 sessionId,
                 filePath,
@@ -427,6 +427,7 @@ export class SessionWatcher implements AgentSessionWatcher {
 
     // Pre-scan existing content for dedup IDs + collect recent entries for catch-up
     const catchUpEntries = this.parser.prescanExistingContent(filePath, stat.size, session)
+    this.clearFinishedMainTools(session, catchUpEntries.at(-1))
 
     // Start from current end — only process NEW events going forward
     session.fileSize = stat.size
@@ -496,6 +497,7 @@ export class SessionWatcher implements AgentSessionWatcher {
     let hasActivity = false
     for (const line of result.lines) {
       const kind = this.parser.processTranscriptLine(line, ORCHESTRATOR_NAME, session.pendingToolCalls, session.seenToolUseIds, sessionId, session.seenMessageHashes)
+      try { this.clearFinishedMainTools(session, JSON.parse(line)) } catch { /* Incomplete or malformed line. */ }
       if (kind !== 'session-title') hasActivity = true
     }
     if (!hasActivity) return
@@ -508,6 +510,44 @@ export class SessionWatcher implements AgentSessionWatcher {
 
     // Reset inactivity timer — session is still active
     this.resetInactivityTimer(sessionId)
+  }
+
+  /** Explicit turn endings override tool IDs left behind by interruption or compaction. */
+  private clearFinishedMainTools(session: WatchedSession, entry?: TranscriptEntry): void {
+    if (!entry?.message) return
+    const content = entry.message.content
+    const text = typeof content === 'string' ? content
+      : Array.isArray(content) ? content.filter(block => block.type === 'text').map(block => 'text' in block ? String(block.text ?? '') : '').join('\n') : ''
+    const finished = entry.type === 'assistant' && ['end_turn', 'stop_sequence'].includes(entry.message.stop_reason ?? '')
+      || entry.type === 'user' && /^\[Request interrupted by user(?: for tool use)?\]$/.test(text.trim())
+    if (!finished) return
+    session.pendingToolCalls.clear()
+    if (session.permissionTimer) clearTimeout(session.permissionTimer)
+    session.permissionTimer = null
+    session.permissionEmitted = false
+  }
+
+  private refreshSessionMetadata(): void {
+    const live = new Map(this.sessionMetadata.listLive().map(record => [record.sessionId, record]))
+    for (const session of this.sessions.values()) {
+      this.parser.refreshSessionTitle(session)
+      const native = live.get(session.sessionId)
+      if (shouldCompleteClaudeSession(session, native)) this.completeSession(session)
+      const info = claudeSessionInfo(session, native)
+      const signature = JSON.stringify([info.label, info.status, info.open])
+      if (this.metadataStates.get(session.sessionId) === signature) continue
+      this.metadataStates.set(session.sessionId, signature)
+      if (session.sessionDetected) this._onSessionLifecycle.fire({ type: 'updated', sessionId: session.sessionId, label: info.label })
+    }
+  }
+
+  private completeSession(session: WatchedSession): void {
+    if (session.sessionCompleted || !session.sessionDetected) return
+    session.sessionCompleted = true
+    if (session.inactivityTimer) clearTimeout(session.inactivityTimer)
+    session.inactivityTimer = null
+    this.emit({ time: this.elapsed(session.sessionId), type: 'agent_complete', payload: { name: ORCHESTRATOR_NAME } }, session.sessionId)
+    this._onSessionLifecycle.fire({ type: 'ended', sessionId: session.sessionId, label: session.label })
   }
 
   /** Reset the inactivity timer. When no new content arrives, emit agent_complete */
@@ -542,17 +582,14 @@ export class SessionWatcher implements AgentSessionWatcher {
 
     session.inactivityTimer = setTimeout(() => {
       if (!session.sessionCompleted && session.sessionDetected) {
+        const native = this.sessionMetadata.get(sessionId)
+        if (native?.nativeStatus === 'busy' || native?.nativeStatus === 'shell') return
         // A quiet tool or extended thinking is still work. Finishing the main
         // would also mark its live children done in the visualizer.
+        if ([...session.pendingToolCalls.values()].some(tool => tool.name !== 'Agent' && tool.name !== 'Task')) return
         if ([...session.subagentWatchers.values()].some(sub => sub.spawnEmitted && !sub.completed)) return
         log.info(`Session ${sessionId.slice(0, SESSION_ID_DISPLAY)} inactive — emitting orchestrator completion`)
-        session.sessionCompleted = true
-        this.emit({
-          time: this.elapsed(sessionId),
-          type: 'agent_complete',
-          payload: { name: ORCHESTRATOR_NAME },
-        }, sessionId)
-        this._onSessionLifecycle.fire({ type: 'ended', sessionId, label: session.label })
+        this.completeSession(session)
       }
     }, INACTIVITY_TIMEOUT_MS)
   }

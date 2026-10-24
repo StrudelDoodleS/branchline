@@ -105,7 +105,7 @@ export function SessionPicker({ open, onClose, returnFocusRef, sessions, selecte
                     <span>{providerName(sessionProvider(session))}</span>
                     <span>{group.id === 'active' || group.id === 'recent' || group.id === 'review-jobs' ? `${shortDate(session.lastActivityTime)} · ` : ''}{clock(session.lastActivityTime)}</span>
                     {session.kind === 'review' && <span className="text-violet-200">Review job</span>}
-                    <span className={session.historical ? 'text-slate-400' : session.status === 'active' ? 'text-emerald-300' : 'text-slate-300'}>{session.historical ? 'Saved' : session.status === 'active' ? 'Working' : 'Idle'}</span>
+                    <span className={session.historical ? 'text-slate-400' : session.status === 'active' ? 'text-emerald-300' : 'text-slate-300'}>{session.historical ? 'Saved' : session.status === 'active' ? 'Working' : session.open ? 'Waiting' : 'Idle'}</span>
                     {sessionsWithActivity.has(session.id) && <span className="text-amber-200">New activity</span>}
                   </span>
                 </button>
