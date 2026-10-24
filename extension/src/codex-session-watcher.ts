@@ -262,17 +262,31 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
     log.info(`Watching ${root} for workspace ${this.workspacePath ?? '<any>'}`)
   }
 
-  private scanForSessions(): void {
+  private scanForSessions(changedDirectory?: string): void {
     for (const session of this.sessions.values()) this.refreshSessionTitle(session)
     const now = new Date()
+    const directories = new Set(recentSessionDirs(now))
+    if (changedDirectory) directories.add(changedDirectory)
+    if (!this.historyIndexed) {
+      this.indexSessionFiles()
+      this.historyIndexed = true
+      // A resumed rollout keeps its original creation directory. Check older
+      // live directories once at startup, then use their file-system events;
+      // the normal timer still scans only the recent dates.
+      for (const file of this.sessionFiles.values()) {
+        const relative = path.relative(sessionsRoot(), file)
+        if (path.isAbsolute(relative) || relative === '..' || relative.startsWith('..' + path.sep)) continue
+        directories.add(path.dirname(file))
+      }
+    }
     let skippedByCwd = 0
-    for (const dir of recentSessionDirs(now)) {
+    for (const dir of directories) {
       if (!fs.existsSync(dir)) continue
 
-      // Watch this day's directory so we pick up new rollout files quickly
+      // Include resumed files in older directories without rescanning history.
       if (!this.dirWatchers.has(dir)) {
         try {
-          const w = fs.watch(dir, () => this.scanForSessions())
+          const w = fs.watch(dir, () => this.scanForSessions(dir))
           this.dirWatchers.set(dir, w)
         } catch (err) { log.debug('Dir watch failed:', dir, err) }
       }
@@ -310,10 +324,6 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
     }
 
     if (this.sessions.size) {
-      if (!this.historyIndexed) {
-        this.indexSessionFiles()
-        this.historyIndexed = true
-      }
       this.restoreHistoricalDescendants()
     }
 

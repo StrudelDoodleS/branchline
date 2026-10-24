@@ -44,8 +44,43 @@ function activityFixture(t: TestContext) {
     else process.env.CODEX_HOME = previous
     fs.rmSync(directory, { recursive: true, force: true })
   })
-  return { watcher, write, append, events, ended }
+  return { watcher, write, append, events, ended, directory }
 }
+
+test('a resumed Codex main in an older date directory is discovered without a recent child', t => {
+  const { watcher, write, directory } = activityFixture(t)
+  const fresh = write(mainId, [lifecycle('task_started')])
+  const oldDay = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10)
+  const oldFolder = path.join(directory, 'sessions', ...oldDay.split('-'))
+  fs.mkdirSync(oldFolder, { recursive: true })
+  fs.renameSync(fresh, path.join(oldFolder, path.basename(fresh)))
+  const archive = path.join(directory, 'archived_sessions', 'rollout-archive-cccccccc-cccc-4ccc-cccc-cccccccccccc.jsonl')
+  fs.mkdirSync(path.dirname(archive), { recursive: true })
+  fs.writeFileSync(archive, JSON.stringify({ type: 'session_meta', payload: {
+    id: 'cccccccc-cccc-4ccc-cccc-cccccccccccc', cwd: directory, source: 'cli',
+  } }) + '\n' + JSON.stringify(lifecycle('task_started')) + '\n')
+  watcher.start()
+  assert.deepEqual(watcher.getActiveSessions().map(session => session.id), [mainId])
+  assert.equal(watcher.getActiveSessions()[0].status, 'active')
+})
+
+test('an older Codex directory change discovers a newly resumed main after startup', t => {
+  const { watcher, write, directory } = activityFixture(t)
+  const fresh = write(mainId, [lifecycle('task_complete')])
+  const oldDay = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10)
+  const oldFolder = path.join(directory, 'sessions', ...oldDay.split('-'))
+  fs.mkdirSync(oldFolder, { recursive: true })
+  const oldFile = path.join(oldFolder, path.basename(fresh))
+  fs.renameSync(fresh, oldFile)
+  const before = new Date(Date.now() - 7 * 86400000)
+  fs.utimesSync(oldFile, before, before)
+  watcher.start()
+  assert.deepEqual(watcher.getActiveSessions(), [])
+  fs.appendFileSync(oldFile, JSON.stringify(lifecycle('task_started')) + '\n')
+  ;(watcher as unknown as { scanForSessions(changedDirectory: string): void }).scanForSessions(oldFolder)
+  assert.equal(watcher.getActiveSessions()[0]?.id, mainId)
+  assert.equal(watcher.getActiveSessions()[0]?.status, 'active')
+})
 
 test('an unfinished native Codex task remains active during quiet reasoning', t => {
   const { watcher, write, ended } = activityFixture(t)
