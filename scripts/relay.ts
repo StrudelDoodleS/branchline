@@ -259,12 +259,17 @@ function readNewLines(sessionId: string) {
   const session = sessions.get(sessionId)
   if (!session) return
 
+  parser.refreshSessionTitle(session)
+
   const result = readNewFileLines(session.filePath, session.fileSize)
   if (!result) return
   session.fileSize = result.newSize
+  let hasActivity = false
   for (const line of result.lines) {
-    parser.processTranscriptLine(line, ORCHESTRATOR_NAME, session.pendingToolCalls, session.seenToolUseIds, sessionId, session.seenMessageHashes)
+    const kind = parser.processTranscriptLine(line, ORCHESTRATOR_NAME, session.pendingToolCalls, session.seenToolUseIds, sessionId, session.seenMessageHashes)
+    if (kind !== 'session-title') hasActivity = true
   }
+  if (!hasActivity) return
 
   handlePermissionDetection(watcherDelegate, ORCHESTRATOR_NAME, session.pendingToolCalls, session, sessionId, session.sessionCompleted, true)
   scanSubagentsDir(watcherDelegate, parser, sessionId)

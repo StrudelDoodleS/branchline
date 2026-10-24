@@ -8,6 +8,7 @@ import { createInterface } from 'node:readline'
 import type { SessionInfo } from '../extension/src/protocol'
 import { claudeUsageCalls, normalizeClaudeUsage, UsageLedger, CodexUsageTracker, type CostRecord } from '../extension/src/token-usage'
 import { codexReviewLabel, codexSessionHierarchy, isCodexExecReview, isCodexReviewAction } from '../extension/src/codex-session-metadata'
+import { claudeSessionTitle, preferClaudeTitle, SessionTitleReader, type ClaudeSessionTitle } from '../extension/src/session-titles'
 
 interface CatalogOptions {
   claudeDir?: string
@@ -206,6 +207,7 @@ export class SessionCatalog {
   private readonly options: Required<CatalogOptions>
   private fileCache = new Map<string, { signature: string; metadata?: SavedFile }>()
   private titleCache?: { signature: string; titles: Map<string, string> }
+  private titleReader = new SessionTitleReader()
   private groups = new Map<string, SessionGroup>()
   private listedAt = 0
   private listing?: Promise<SessionInfo[]>
@@ -361,6 +363,7 @@ export class SessionCatalog {
       let agentName = child ? path.basename(candidate.file, '.jsonl') : 'Main session'
       let project = candidate.project ?? ''
       let title: string | undefined, prompt: string | undefined, model: string | undefined, provider: string | undefined
+      let claudeTitle: ClaudeSessionTitle | undefined
       let codexMetadata: unknown, kind: 'review' | undefined
       let start: number | undefined, end: number | undefined
       let count = 0
@@ -389,7 +392,8 @@ export class SessionCatalog {
           valid = true
           if (entry.isSidechain === true && !candidate.child) child = true
           project = string(entry.cwd) ?? project
-          if (entry.type === 'custom-title') title = label(entry.customTitle) ?? title
+          claudeTitle = preferClaudeTitle(claudeTitle, claudeSessionTitle(entry))
+          title = claudeTitle?.label
           if (!prompt && entry.type === 'user' && entry.isMeta !== true) prompt = userPrompt(message.content)
           model = string(message.model) ?? model
           const inner = object(object(entry.data).message)
@@ -470,7 +474,7 @@ export class SessionCatalog {
       if (!main) continue
       const startTime = Math.min(...files.map(file => file.startTime))
       const lastActivityTime = Math.max(...files.map(file => file.lastActivityTime))
-      const savedTitle = [(main.runtime === 'codex' ? titles.get(id) : undefined), main.title]
+      const savedTitle = [(main.runtime === 'codex' ? titles.get(id) : this.titleReader.claude(main.file)), main.title]
         .find(title => title && (main.runtime !== 'codex' || !isCodexReviewAction(title)))
       const title = savedTitle ?? (main.kind === 'review' ? codexReviewLabel(main.project) : main.prompt)
         ?? `${path.basename(main.project) || main.runtime} · ${new Date(startTime).toISOString().slice(0, 10)}`

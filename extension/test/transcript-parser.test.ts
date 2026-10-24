@@ -474,6 +474,20 @@ describe('Claude context usage', () => {
 })
 
 describe('Claude session titles', () => {
+  it('ignores child titles and duplicate generated titles while accepting a new main-session name', () => {
+    const { session, feed } = setup()
+    feed({ type: 'ai-title', aiTitle: 'Main release work' })
+    assert.equal(session.label, 'Main release work')
+    feed({ type: 'custom-title', customTitle: 'A child task' }, 'Researcher')
+    feed({ type: 'ai-title', aiTitle: 'Generated child title' }, 'Researcher')
+    assert.equal(session.label, 'Main release work')
+    feed({ type: 'ai-title', aiTitle: 'Updated release work' })
+    assert.equal(session.label, 'Updated release work')
+    feed({ type: 'custom-title', customTitle: 'My release session' })
+    feed({ type: 'ai-title', aiTitle: 'Later automatic name' })
+    assert.equal(session.label, 'My release session')
+  })
+
   it('uses the saved custom title instead of the first injected-looking message', () => {
     const { parser, session, feed } = setup()
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-flow-title-'))

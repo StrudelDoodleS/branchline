@@ -34,6 +34,10 @@ test('relay retains archived child charges and broadcasts the real provider and 
   }
   write(current, main, 1000)
   write(archived, child, 2000, main)
+  fs.writeFileSync(path.join(directory, 'session_index.jsonl'), [
+    { id: main, thread_name: 'Named main session' },
+    { id: later, thread_name: 'Codex review of the inference suite' },
+  ].map(record => JSON.stringify(record)).join('\n') + '\n')
   const bundle = path.join(directory, 'relay.cjs')
   buildSync({ entryPoints: [path.resolve('scripts/relay.ts')], outfile: bundle, bundle: true, platform: 'node', format: 'cjs',
     alias: { vscode: path.resolve('scripts/vscode-shim.js') } })
@@ -95,6 +99,7 @@ test('relay retains archived child charges and broadcasts the real provider and 
     assert.equal(found.runtime, 'codex')
     assert.equal(found.lastActivityTime, mtime)
     assert.equal(found.kind, undefined)
+    assert.equal(found.label, 'Codex review of the inference suite')
     // Discovery may precede the second record. The live transport must carry
     // classification, rather than leave clients with just a new title.
     fs.appendFileSync(file, JSON.stringify({ type: 'event_msg', payload: { type: 'item_completed',
@@ -118,6 +123,7 @@ test('relay retains archived child charges and broadcasts the real provider and 
     assert.equal(details?.provider, 'custom-vendor')
     assert.equal(details?.id, later)
     assert.equal(details?.label, update.label)
+    assert.equal(details?.label, 'Codex review of the inference suite')
   } finally {
     abort.abort()
     relay?.dispose()

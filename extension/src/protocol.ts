@@ -77,6 +77,7 @@ export type WebviewToExtensionMessage =
 
 export interface TranscriptEntry {
   customTitle?: string
+  aiTitle?: string
   timestamp?: string
   effort?: string | null
   perTurnEffort?: string | null
@@ -223,6 +224,8 @@ export interface WatchedSession {
   subagentsDir: string | null
   label: string
   labelSet: boolean
+  sessionTitleSource?: 'custom' | 'auto'
+  sidecarTitle?: string
   model: string | null
   /** Maps agent names to their last emitted model ID — re-emits on model change */
   modelDetectedAgents: Map<string, string>

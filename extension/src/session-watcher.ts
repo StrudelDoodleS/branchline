@@ -488,12 +488,17 @@ export class SessionWatcher implements AgentSessionWatcher {
     const session = this.sessions.get(sessionId)
     if (!session) { return }
 
+    this.parser.refreshSessionTitle(session)
+
     const result = readNewFileLines(session.filePath, session.fileSize)
     if (!result) return
     session.fileSize = result.newSize
+    let hasActivity = false
     for (const line of result.lines) {
-      this.parser.processTranscriptLine(line, ORCHESTRATOR_NAME, session.pendingToolCalls, session.seenToolUseIds, sessionId, session.seenMessageHashes)
+      const kind = this.parser.processTranscriptLine(line, ORCHESTRATOR_NAME, session.pendingToolCalls, session.seenToolUseIds, sessionId, session.seenMessageHashes)
+      if (kind !== 'session-title') hasActivity = true
     }
+    if (!hasActivity) return
 
     // Detect permission-gated tool calls (skip Agent/Task — subagents are inherently slow)
     handlePermissionDetection(this.selfDelegate, ORCHESTRATOR_NAME, session.pendingToolCalls, session, sessionId, session.sessionCompleted, true)

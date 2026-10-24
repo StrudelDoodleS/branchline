@@ -28,7 +28,8 @@ import {
 import type { AgentSessionWatcher, SessionLifecycleEvent } from './session-runtime'
 import { TypedEventEmitter } from './typed-event-emitter'
 import { buildCostHistory, type CostRecord, type CostHistoryOptions } from './token-usage'
-import { codexReviewLabel, codexSessionHierarchy, isCodexExecReview } from './codex-session-metadata'
+import { codexReviewLabel, codexSessionHierarchy, isCodexExecReview, isCodexReviewAction } from './codex-session-metadata'
+import { sessionTitle, SessionTitleReader } from './session-titles'
 
 const log = createLogger('CodexSessionWatcher')
 
@@ -55,6 +56,7 @@ interface WatchedCodexSession {
   sessionDetected: boolean
   sessionCompleted: boolean
   label: string
+  savedTitle?: string
   rolloutState: CodexRolloutState
   parser: CodexRolloutParser
   parentId: string | null
@@ -69,6 +71,7 @@ interface SessionMetadata {
   displayName: string
   provider?: string
   kind?: 'review'
+  title?: string
 }
 
 function codexHome(): string {
@@ -138,7 +141,7 @@ function readSessionMetadata(filePath: string): SessionMetadata | null {
       const data = Buffer.concat(chunks)
       const line = data.subarray(0, end >= 0 ? end : data.length).toString('utf-8')
       const parsed = JSON.parse(line) as { type?: string; payload?: {
-        cwd?: string; model_provider?: string; source?: unknown
+        cwd?: string; model_provider?: string; source?: unknown; thread_name?: unknown; title?: unknown
       } }
       if (parsed.type !== 'session_meta') return null
       const payload = parsed.payload
@@ -159,6 +162,7 @@ function readSessionMetadata(filePath: string): SessionMetadata | null {
         displayName: hierarchy.agentName,
         provider: typeof payload?.model_provider === 'string' ? payload.model_provider : undefined,
         kind,
+        title: sessionTitle(payload?.thread_name) ?? sessionTitle(payload?.title),
       }
     } finally { fs.closeSync(fd) }
   } catch { return null }
@@ -167,6 +171,7 @@ function readSessionMetadata(filePath: string): SessionMetadata | null {
 // ─── Watcher ───────────────────────────────────────────────────────────────
 
 export class CodexSessionWatcher implements AgentSessionWatcher {
+  private titleReader = new SessionTitleReader()
   private dirWatchers = new Map<string, fs.FSWatcher>()
   private sessions = new Map<string, WatchedCodexSession>()
   private sessionFiles = new Map<string, string>()
@@ -256,6 +261,7 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
   }
 
   private scanForSessions(): void {
+    for (const session of this.sessions.values()) this.refreshSessionTitle(session)
     const now = new Date()
     let skippedByCwd = 0
     for (const dir of recentSessionDirs(now)) {
@@ -485,7 +491,9 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
     }
     const existingRoot = parentId ? this.rootSession(parentId) : undefined
     const groupWasActive = existingRoot ? this.groupIsActive(existingRoot.sessionId) : false
-    const label = metadata?.kind === 'review' ? codexReviewLabel(metadata.cwd) : `Codex ${sessionId.slice(0, SESSION_ID_DISPLAY)}`
+    const candidateTitle = this.titleReader.codex(codexHome(), sessionId) ?? metadata?.title
+    const savedTitle = candidateTitle && !isCodexReviewAction(candidateTitle) ? candidateTitle : undefined
+    const label = savedTitle ?? (metadata?.kind === 'review' ? codexReviewLabel(metadata.cwd) : `Codex ${sessionId.slice(0, SESSION_ID_DISPLAY)}`)
 
     // Build the parser once per session so the delegate closures capture the
     // right session reference and re-emission is stateless on this side.
@@ -497,7 +505,7 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
       },
       setLabel: (newLabel) => {
         const s = this.sessions.get(sessionId)
-        if (!s || !s.label.startsWith('Codex ')) return // only replace auto-label
+        if (!s || s.savedTitle || !s.label.startsWith('Codex ')) return // only replace auto-label
         s.label = newLabel
         if (!s.parentId) this._onSessionLifecycle.fire({ type: 'updated', sessionId, label: newLabel })
       },
@@ -505,8 +513,8 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
         const s = this.sessions.get(sessionId)
         if (!s || s.kind === 'review') return
         s.kind = 'review'
-        s.label = newLabel
-        if (!s.parentId && s.sessionDetected) this._onSessionLifecycle.fire({ type: 'updated', sessionId, label: newLabel })
+        s.label = s.savedTitle ?? newLabel
+        if (!s.parentId && s.sessionDetected) this._onSessionLifecycle.fire({ type: 'updated', sessionId, label: s.label })
       },
     })
 
@@ -523,6 +531,7 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
       sessionDetected: false,
       sessionCompleted: inactiveHistory,
       label,
+      savedTitle,
       rolloutState: createCodexRolloutState(),
       parser,
       parentId,
@@ -557,9 +566,21 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
     log.info(`Attached to session ${sessionId.slice(0, SESSION_ID_DISPLAY)} at ${filePath}`)
   }
 
+  private refreshSessionTitle(session: WatchedCodexSession): void {
+    if (session.parentId) return
+    const title = this.titleReader.codex(codexHome(), session.sessionId)
+    if (!title) return
+    session.savedTitle = title
+    if (session.label === title) return
+    session.label = title
+    if (session.sessionDetected) this._onSessionLifecycle.fire({ type: 'updated', sessionId: session.sessionId, label: title })
+  }
+
   private readNewLines(sessionId: string, restoring = false): void {
     const session = this.sessions.get(sessionId)
     if (!session) return
+
+    this.refreshSessionTitle(session)
 
     const result = readNewFileLines(session.filePath, session.fileSize, session.fileTail)
     if (!result) return

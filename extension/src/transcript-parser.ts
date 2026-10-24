@@ -28,6 +28,7 @@ import { estimateTokensFromContent, estimateTokensFromText } from './token-estim
 import { createLogger } from './logger'
 import { recordClaudeContext } from './claude-context'
 import { normalizeClaudeUsage, claudeUsageCalls, UsageLedger } from './token-usage'
+import { claudeSessionTitle, preferClaudeTitle, SessionTitleReader, type ClaudeSessionTitle } from './session-titles'
 
 const log = createLogger('TranscriptParser')
 
@@ -159,7 +160,7 @@ export class TranscriptParser {
     ctxSeen: Set<string>,
     sessionId?: string,
     ctxSeenMessages?: Set<string>,
-  ): void {
+  ): 'session-title' | void {
     let parsed: Record<string, unknown>
     try {
       parsed = JSON.parse(line.trim()) as Record<string, unknown>
@@ -168,15 +169,14 @@ export class TranscriptParser {
       return
     }
 
-    // Handle inline subagent progress events (newer Claude Code versions)
-    if (parsed.type === 'custom-title' && typeof parsed.customTitle === 'string' && parsed.customTitle.trim() && sessionId) {
+    if (parsed.type === 'custom-title' || parsed.type === 'ai-title') {
+      // Child transcripts can have their own titles; they never rename the parent.
+      if (agentName !== ORCHESTRATOR_NAME || !sessionId) return 'session-title'
       const session = this.delegate.getSession(sessionId)
-      if (session) {
-        session.label = parsed.customTitle.trim()
-        session.labelSet = true
+      if (session && this.applySessionTitle(session, claudeSessionTitle(parsed))) {
         this.delegate.fireSessionLifecycle({ type: 'updated', sessionId, label: session.label })
       }
-      return
+      return 'session-title'
     }
     if (parsed.type === 'progress') {
       this.handleProgressEvent(parsed, sessionId)
@@ -599,7 +599,7 @@ export class TranscriptParser {
    * 2. Return all entries for catch-up emission
    */
   prescanExistingContent(filePath: string, size: number, session: WatchedSession): TranscriptEntry[] {
-    if (size === 0) { return [] }
+    if (size === 0) { this.refreshSessionTitle(session); return [] }
     const catchUpEntries: TranscriptEntry[] = []
     try {
       // Read only up to `size` bytes — the file may have grown since stat.
@@ -612,10 +612,7 @@ export class TranscriptParser {
           const entry = JSON.parse(line.trim()) as TranscriptEntry & { toolUseResult?: unknown }
           this.recordAssistantUsage(entry, ORCHESTRATOR_NAME, session)
           this.recordAssistantSettings(entry, ORCHESTRATOR_NAME, session)
-          if (entry.type === 'custom-title' && typeof entry.customTitle === 'string' && entry.customTitle.trim()) {
-            session.label = entry.customTitle.trim()
-            session.labelSet = true
-          }
+          this.applySessionTitle(session, claudeSessionTitle(entry))
           // Track background subagents still running at attach time, so the
           // <task-notification> that arrives later can complete them.
           if (entry.type === 'user' && entry.message) {
@@ -701,6 +698,32 @@ export class TranscriptParser {
     } catch (err) {
       log.error('Pre-scan failed:', err)
       return []
+    } finally {
+      this.refreshSessionTitle(session)
+    }
+  }
+
+  private readonly titleReader = new SessionTitleReader()
+
+  private applySessionTitle(session: WatchedSession, next: ClaudeSessionTitle | undefined): boolean {
+    const current = session.sessionTitleSource ? { label: session.label, source: session.sessionTitleSource } : undefined
+    const title = preferClaudeTitle(current, next)
+    if (!title) return false
+    const changed = session.label !== title.label
+    session.label = title.label
+    session.labelSet = true
+    session.sessionTitleSource = title.source
+    return changed
+  }
+
+  /** Called from existing reads, including idle fallback reads. Renaming is metadata,
+   * so it neither revives a session nor advances its activity timestamp. */
+  refreshSessionTitle(session: WatchedSession): void {
+    const label = this.titleReader.claude(session.filePath)
+    if (label === session.sidecarTitle) return
+    session.sidecarTitle = label
+    if (label && this.applySessionTitle(session, { label, source: 'custom' }) && session.sessionDetected) {
+      this.delegate.fireSessionLifecycle({ type: 'updated', sessionId: session.sessionId, label: session.label })
     }
   }
 

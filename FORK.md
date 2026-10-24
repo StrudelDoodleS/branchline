@@ -17,7 +17,7 @@ Branchline is maintained by StrudelDoodleS and derives from Agent Flow by Simon 
 - Codex thread ancestry and lifecycle aggregation: a working descendant keeps its main session active, and resuming it restores completed ancestors.
 - Completing a reply leaves background subagents running under their own lifecycle; an explicit session end closes the full descendant tree.
 - Bounded replay history with retained agent identities, per-session snapshots, sequence waterlines, stream-aware live-event buffering, and explicit reset handling.
-- Claude saved titles, latest cache-inclusive context usage per agent, replay-safe response tracking, and normalized context-bar/ring composition.
+- Codex saved session names and Claude manual/generated titles, including sidecar-only names and live renames; prompts are a fallback for unnamed sessions. Latest cache-inclusive Claude context usage per agent, replay-safe response tracking, and normalized context-bar/ring composition.
 - Cumulative API usage and per-request list-price estimates for main sessions and subagents, including cache categories, Codex compaction calls, replay deduplication, and completed-agent retention.
 - A touch-friendly cumulative cost history graph, using original response dates and loading only while the cost panel is open.
 - Dollar burn rate from raw response charges, with shared input/output/cache overlays, idle intervals, and Claude compaction iteration accounting.
