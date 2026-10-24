@@ -14,6 +14,7 @@ import { DailyBurnComparison } from './daily-burn-comparison'
 import type { BurnSource } from '@/hooks/burn-comparison'
 import { curvePath } from '@/hooks/curve-path'
 import { formatModelName } from '@/lib/utils'
+import { agentCostLabel } from '@/lib/cost-agent-label'
 
 const LEFT = 42, RIGHT = 292, TOP = 12
 const SOURCES = [
@@ -159,11 +160,12 @@ export const CostHistoryChart = memo(function CostHistoryChart({ sessionId, init
   }
   const group = history?.groups?.find(group => group.id === options.group)
   const codexZeroWrites = history?.groups?.some(group => (!options.group || group.id === options.group)
-    && /^gpt-(6|5\.6)/.test(group.model ?? '') && group.tokens.cacheWriteTokens === 0)
+    && (options.groupBy === 'agent' ? group.cacheWritesUnknown : /^gpt-(6|5\.6)/.test(group.model ?? '') && group.tokens.cacheWriteTokens === 0))
 
   const burnValue = !selectedRate ? null : burnSource === 'all' || burnSource === 'total' ? selectedRate.costUSDPerMinute * unit.factor : rateParts[burnSource]
   const unknownBurn = burnSource === 'cacheWrite' && codexZeroWrites
-  const scopeLabel = group ? `${group.model ? formatModelName(group.model) : 'Model unreported'}${options.groupBy === 'model-reasoning' ? ` · ${group.reasoningEffort ?? 'effort unreported'}` : ''}` : 'All models'
+  const scopeLabel = options.groupBy === 'agent' ? group ? agentCostLabel(group, history?.groups ?? []) : 'All agents'
+    : group ? `${group.model ? formatModelName(group.model) : 'Model unreported'}${options.groupBy === 'model-reasoning' ? ` · ${group.reasoningEffort ?? 'effort unreported'}` : ''}` : 'All models'
   const short = (timestamp: number) => new Date(timestamp).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
   const clock = (timestamp: number) => new Date(timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
   const rangeLabel = short(start) === short(end) ? `${short(start)} · ${clock(start)} – ${clock(end)}` : `${short(start)} – ${short(end)}`
@@ -173,19 +175,26 @@ export const CostHistoryChart = memo(function CostHistoryChart({ sessionId, init
     <div className="flex min-h-11 items-start justify-between gap-3">
       <div className="min-w-0">
         <p className="truncate text-sm text-slate-400" title={scopeLabel}>{scopeLabel}</p>
+        {options.groupBy === 'agent' && options.group && !filters && <button type="button" aria-label="Show costs for all agents"
+          onClick={() => changeOptions({ ...options, group: undefined })} className="min-h-11 text-xs text-cyan-200">← All agents</button>}
         {view !== 'compare' && <>
-          <p className="mt-3 text-sm text-slate-300">{view === 'spend' ? 'Session spend' : 'Burn rate'}</p>
+          <p className="mt-3 text-sm text-slate-300">{view === 'spend' ? options.groupBy === 'agent' && options.group ? 'Agent spend' : 'Session spend' : 'Burn rate'}</p>
           <output aria-label="Chart headline" className="mt-1 block text-4xl font-semibold tracking-tight text-slate-100">
             {!history ? '—' : unavailable ? 'Unpriced' : view === 'spend' ? dollar(history.totalCostUSD ?? 0) : unknownBurn ? 'Unknown' : burnValue === null ? '—' : dollar(burnValue)}
             {view === 'burn' && history && !unavailable && !unknownBurn && burnValue !== null && <span className="ml-1 text-lg font-normal text-slate-400">/{unit.suffix}</span>}
           </output>
         </>}
       </div>
-      <button type="button" aria-label="Cost filters" aria-expanded={filters} onClick={() => setFilters(value => !value)}
-        className="min-h-11 shrink-0 rounded-lg bg-slate-800 px-3 text-sm text-slate-200">Filters</button>
+      <div className="flex shrink-0 gap-2">
+        <button type="button" aria-label="Costs by agent" aria-pressed={options.groupBy === 'agent'}
+          onClick={() => { if (options.groupBy !== 'agent') changeOptions({ ...options, groupBy: 'agent', group: undefined }); setFilters(true) }}
+          className="min-h-11 rounded-lg bg-slate-800 px-3 text-sm text-cyan-100">Agents</button>
+        <button type="button" aria-label="Cost filters" aria-expanded={filters} onClick={() => setFilters(value => !value)}
+          className="min-h-11 rounded-lg bg-slate-800 px-3 text-sm text-slate-200">Filters</button>
+      </div>
     </div>
     <div hidden={!filters} className="mt-3 rounded-xl border border-slate-700 p-3">
-      <CostAnalyticsControls options={options} history={history} onChange={changeOptions} showRange={false} />
+      <CostAnalyticsControls options={options} history={history} onChange={next => { changeOptions(next); if (next.groupBy === 'agent' && next.group) setFilters(false) }} showRange={false} />
       <button type="button" onClick={() => setFilters(false)} className="mt-3 min-h-11 w-full rounded-lg bg-slate-700 text-sm">Done</button>
     </div>
     <div role="tablist" aria-label="Cost chart" className="mt-5 grid grid-cols-3 gap-1 rounded-xl bg-slate-950/60 p-1"

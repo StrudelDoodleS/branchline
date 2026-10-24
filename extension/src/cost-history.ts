@@ -19,7 +19,7 @@ export interface CostRecord {
 export interface CostHistoryPoint { timestamp: number; costUSD: number; breakdownUSD: CostBreakdown }
 export interface BurnRatePoint { timestamp: number; costUSDPerMinute: number; breakdownUSDPerMinute: CostBreakdown }
 export type CostResolution = 'auto' | 'minute' | 'hour' | 'day'
-export type CostGrouping = 'model' | 'model-reasoning'
+export type CostGrouping = 'model' | 'model-reasoning' | 'agent'
 export type CostRange = 'total' | '1h' | '2h' | 'custom' | 'window'
 export interface CostHistoryOptions {
   resolution?: CostResolution; groupBy?: CostGrouping; group?: string; range?: CostRange
@@ -31,6 +31,9 @@ export interface CostHistoryOptions {
 }
 export interface CostGroup {
   id: string
+  agentId?: string
+  agentName?: string
+  cacheWritesUnknown?: boolean
   model?: string
   reasoningEffort?: string
   records: number
@@ -67,12 +70,14 @@ function add(target: CostBreakdown, source: CostBreakdown, factor = 1): void {
 const priced = (record: CostRecord): record is CostRecord & { costUSD: number } => record.costUSD !== null && Number.isFinite(record.costUSD) && record.costUSD >= 0
 const dated = (record: CostRecord): record is CostRecord & { timestamp: number } => record.timestamp !== undefined && Number.isFinite(record.timestamp) && record.timestamp >= 0
 const parts = (record: CostRecord & { costUSD: number }) => record.breakdownUSD ?? { ...emptyBreakdown(), unattributed: record.costUSD }
-const groupId = (record: CostRecord, groupBy: CostGrouping) => JSON.stringify([record.model || null, groupBy === 'model-reasoning' ? record.reasoningEffort || null : null])
+const groupId = (record: CostRecord, groupBy: CostGrouping) => groupBy === 'agent'
+  ? JSON.stringify(['agent', record.agentId || null])
+  : JSON.stringify([record.model || null, groupBy === 'model-reasoning' ? record.reasoningEffort || null : null])
 
 /** Normalize browser query strings and webview requests at the shared boundary. */
 export function normalizeCostHistoryOptions(raw: Record<string, unknown> = {}): CostHistoryOptions {
   const resolution = raw.resolution === 'minute' || raw.resolution === 'hour' || raw.resolution === 'day' ? raw.resolution : 'auto'
-  const groupBy = raw.groupBy === 'model-reasoning' ? 'model-reasoning' : 'model'
+  const groupBy = raw.groupBy === 'agent' || raw.groupBy === 'model-reasoning' ? raw.groupBy : 'model'
   const number = (value: unknown) => (typeof value === 'number' || typeof value === 'string' && value.trim()) && Number.isFinite(Number(value)) ? Number(value) : NaN
   const hours = number(raw.hours), start = number(raw.start), end = number(raw.end)
   const range = raw.range === 'custom' && hours >= 1 / 60 && hours <= 8760 ? 'custom'
@@ -88,11 +93,13 @@ function summarize(records: CostRecord[], groupBy: CostGrouping, durationMs: num
   const groups = new Map<string, CostGroup & { unpriced: boolean; untimed: boolean }>()
   for (const record of records) {
     const id = groupId(record, groupBy)
-    const group = groups.get(id) ?? { id, model: record.model || undefined,
+    const group = groups.get(id) ?? { id, model: groupBy === 'agent' ? undefined : record.model || undefined,
+      ...(groupBy === 'agent' ? { agentId: record.agentId, agentName: record.agentName || record.agentId || 'Unattributed agent', cacheWritesUnknown: false } : {}),
       reasoningEffort: groupBy === 'model-reasoning' ? record.reasoningEffort : undefined,
       records: 0, tokens: emptyTokens(), totalTokens: 0, costUSD: 0, knownCostUSD: 0,
       breakdownUSD: emptyBreakdown(), averageCostUSDPerMinute: null, unpriced: false, untimed: false }
     group.records++
+    if (groupBy === 'agent' && /^gpt-(6|5\.6)/.test(record.model ?? '') && record.tokens?.cacheWriteTokens === 0) group.cacheWritesUnknown = true
     if (record.tokens) for (const key of TOKEN_KEYS) group.tokens[key] += record.tokens[key]
     if (priced(record)) {
       group.knownCostUSD += record.costUSD
@@ -116,7 +123,10 @@ export function buildCostHistory(source: Iterable<CostRecord>, maxPoints = 240, 
   let first = Infinity, last = -Infinity
   for (const record of records) if (dated(record)) { first = Math.min(first, record.timestamp); last = Math.max(last, record.timestamp) }
   const latest = Number.isFinite(last) ? Math.max(last, now !== undefined && Number.isFinite(now) ? now : last) : 0
-  const groups = summarize(records, options.groupBy!, Number.isFinite(first) ? Math.max(1, latest - first) : 0)
+  // Day comparisons need the selected series, not another copy of hundreds of
+  // agent summaries. The main request retains the full chooser and breakdowns.
+  const groups = options.fixedWindow && options.groupBy === 'agent' ? undefined
+    : summarize(records, options.groupBy!, Number.isFinite(first) ? Math.max(1, latest - first) : 0)
   const charges = new Map<number, { costUSD: number; breakdownUSD: CostBreakdown }>()
   let untimedCostUSD = 0, unpricedResponses = 0, total = 0
   for (const record of records) {
