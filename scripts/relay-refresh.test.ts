@@ -20,7 +20,7 @@ function temporaryDirectory(t: TestContext) {
   return directory
 }
 
-function writeSession(directory: string) {
+function writeSession(directory: string, usage = false) {
   const day = new Date().toISOString().slice(0, 10)
   const folder = path.join(directory, 'sessions', ...day.split('-'))
   fs.mkdirSync(folder, { recursive: true })
@@ -28,6 +28,9 @@ function writeSession(directory: string) {
   fs.writeFileSync(file, [
     { type: 'session_meta', payload: { id: sessionId, cwd: directory, source: 'cli' } },
     ...Array.from({ length: 40 }, (_, index) => message(`Historical message ${index}: ${'synthetic fixture text '.repeat(200)}`)),
+    ...(usage ? [{ type: 'turn_context', payload: { model: 'gpt-6.1-sol' } },
+      ...Array.from({ length: 20 }, (_, index) => ({ type: 'token_usage_record', timestamp: `2026-10-${String(index + 1).padStart(2,'0')}T12:00:00Z`,
+        payload: { response_id: `response-${index}`, usage: { input_tokens: 1000, cached_input_tokens: 0, output_tokens: 100 } } }))] : []),
   ].map(record => JSON.stringify(record)).join('\n') + '\n')
   return file
 }
@@ -43,9 +46,9 @@ function bundle(entry: string, directory: string) {
   return outfile
 }
 
-async function fixture(t: TestContext, populated = false) {
+async function fixture(t: TestContext, populated = false, usage = false) {
   const directory = temporaryDirectory(t)
-  const file = populated ? writeSession(directory) : undefined
+  const file = populated ? writeSession(directory, usage) : undefined
   const previousHome = process.env.CODEX_HOME
   const previousCache = process.env.XDG_CACHE_HOME
   process.env.CODEX_HOME = directory
@@ -59,6 +62,7 @@ async function fixture(t: TestContext, populated = false) {
     res.setHeader('Vary', 'Origin')
     if (req.url?.startsWith('/events')) return relay.handleSSE(req, res)
     if (req.url?.startsWith('/session-events')) return void relay.handleSessionReplay(req, res)
+    if (req.url?.startsWith('/session-cost-history')) return void relay.handleCostHistory(req, res)
     res.writeHead(404); res.end()
   })
   const sockets = new Set<import('node:net').Socket>()
@@ -147,6 +151,26 @@ test('legacy SSE keeps its initial historical batch', { timeout: 10000 }, async 
   assert.equal(batch.type, 'agent-event-batch')
   const replay = JSON.parse((await get(origin, `/session-events?sessionId=${sessionId}`)).body.toString()) as SessionReplay
   assert.deepEqual(batch.events, replay.events)
+})
+
+test('timeline HTTP returns bounded full-history cells through negotiated gzip', { timeout: 10000 }, async t => {
+  const { origin } = await fixture(t, true, true)
+  const route=`/session-cost-history?sessionId=${sessionId}&timeline=true&timezone=UTC&timelineDay=2026-10-20&timelineSlot=2`
+  const plain=await get(origin,route)
+  assert.equal(plain.status,200)
+  const data=JSON.parse(plain.body.toString())
+  assert.equal(data.history.timeline.days.length,14)
+  assert.equal(data.history.timeline.allTime.records,20)
+  assert.equal(data.history.timeline.selected.cell.records,1)
+  assert.equal(data.history.timeline.selected.agents.length,1)
+  assert.equal(data.history.groups,undefined)
+  const zipped=await get(origin,route,'gzip')
+  assert.equal(zipped.headers['content-encoding'],'gzip')
+  assert.equal(zipped.headers['cache-control'],'no-store')
+  assert.equal(Number(zipped.headers['content-length']),zipped.body.length)
+  assert.deepEqual(gunzipSync(zipped.body),plain.body)
+  assert.ok(zipped.body.length<plain.body.length/4)
+  assert.equal((await get(origin,'/session-cost-history?sessionId=missing&timeline=true')).status,404)
 })
 
 test('replay JSON negotiates gzip without changing event identities or the waterline', { timeout: 10000 }, async t => {

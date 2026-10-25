@@ -2,6 +2,7 @@
 import type { TokenCounts } from './token-usage'
 import { clampCostWindow, type CostTimeWindow } from './cost-window'
 import { buildCacheReuse, type CacheReuseAnalytics } from './cache-reuse'
+import { buildSessionTimeline, normalizeTimelineOptions, type TimelineOptions, type SessionTimeline } from './session-timeline'
 
 export interface CostBreakdown { input: number; output: number; cacheRead: number; cacheWrite: number; unattributed: number }
 export interface CostRecord {
@@ -21,7 +22,7 @@ export interface BurnRatePoint { timestamp: number; costUSDPerMinute: number; br
 export type CostResolution = 'auto' | 'minute' | 'hour' | 'day'
 export type CostGrouping = 'model' | 'model-reasoning' | 'agent'
 export type CostRange = 'total' | '1h' | '2h' | 'custom' | 'window'
-export interface CostHistoryOptions {
+export interface CostHistoryOptions extends TimelineOptions {
   resolution?: CostResolution; groupBy?: CostGrouping; group?: string; range?: CostRange
   hours?: number
   start?: number
@@ -45,6 +46,7 @@ export interface CostGroup {
   averageCostUSDPerMinute: number | null
 }
 export interface CostHistory {
+  timeline?: SessionTimeline
   cacheReuse?: CacheReuseAnalytics
   points: CostHistoryPoint[]
   burnRate: { bucketMs: number; endTimestamp?: number; points: BurnRatePoint[] }
@@ -84,6 +86,7 @@ export function normalizeCostHistoryOptions(raw: Record<string, unknown> = {}): 
     : raw.range === 'window' && start >= 0 && end > start && end <= 8640000000000000 ? 'window'
     : raw.range === '1h' || raw.range === '2h' ? raw.range : 'total'
   return { resolution, groupBy, range,
+    ...((raw.timeline === true || raw.timeline === 'true' || raw.timeline === '1') ? normalizeTimelineOptions(raw) : {}),
     ...(range === 'custom' ? { hours } : {}), ...(range === 'window' ? { start, end } : {}),
     ...(range === 'window' && (raw.fixedWindow === true || raw.fixedWindow === 'true') ? { fixedWindow: true } : {}),
     ...(typeof raw.group === 'string' && raw.group.length <= 1024 && raw.group ? { group: raw.group } : {}) }
@@ -120,6 +123,11 @@ function summarize(records: CostRecord[], groupBy: CostGrouping, durationMs: num
 export function buildCostHistory(source: Iterable<CostRecord>, maxPoints = 240, now?: number, query: CostHistoryOptions = {}): CostHistory {
   const options = normalizeCostHistoryOptions({ ...query })
   const records = [...source]
+  if (options.timeline) {
+    const timeline = buildSessionTimeline(options.group ? records.filter(record => groupId(record, options.groupBy!) === options.group) : records, options)
+    return { points: [], burnRate: { bucketMs: 21600000, points: [] }, totalCostUSD: timeline.allTime.costUSD,
+      unpricedResponses: timeline.allTime.unpricedResponses, untimedCostUSD: timeline.allTime.untimedKnownCostUSD, timeline }
+  }
   let first = Infinity, last = -Infinity
   for (const record of records) if (dated(record)) { first = Math.min(first, record.timestamp); last = Math.max(last, record.timestamp) }
   const latest = Number.isFinite(last) ? Math.max(last, now !== undefined && Number.isFinite(now) ? now : last) : 0

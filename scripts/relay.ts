@@ -610,8 +610,12 @@ export async function createRelay(options: RelayOptions): Promise<Relay> {
           const records = await sessionCatalog.records(sessionId)
           if (records) history = buildCostHistory(records, 240, undefined, options)
         }
-        res.writeHead(history ? 200 : 404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-        res.end(JSON.stringify(history ? { sessionId, history } : { error: 'Cost history is unavailable' }))
+        const body = history ? { sessionId, history } : { error: 'Cost history is unavailable' }
+        if (options.timeline) await sendJson(req, res, history ? 200 : 404, body)
+        else {
+          res.writeHead(history ? 200 : 404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+          res.end(JSON.stringify(body))
+        }
       } catch {
         res.writeHead(500, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify({ error: 'Could not load saved session costs' }))
       }
