@@ -70,7 +70,7 @@ export function useCostHistory(sessionId: string | null, options: CostHistoryOpt
         ? { history: previous.history, historySignature: previous.historySignature, historyQueryKey: previous.historyQueryKey } : {}) }))
     const load = async () => {
       controller = new AbortController()
-      const timeout = setTimeout(() => controller?.abort(), 10000)
+      const timeout = setTimeout(() => controller?.abort(), query.timeline ? 30000 : 10000)
       try {
         const history = await requestHistory(sessionId, query, controller.signal)
         if (active) {

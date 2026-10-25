@@ -40,7 +40,8 @@ export function AgentVisualizer() {
   const [viewMode, setViewMode] = useState<'tree' | 'graph'>('tree')
   const [showCostOverlay, setShowCostOverlay] = useState(false)
   const [showSpendDashboard, setShowSpendDashboard] = useState(false)
-  const graphicsCovered = showSpendDashboard || (showCostOverlay && phoneLayout)
+  const [showTimeline, setShowTimeline] = useState(false)
+  const graphicsCovered = showTimeline || showSpendDashboard || (showCostOverlay && phoneLayout)
   const bridge = useVSCodeBridge()
   const spendSessionsRef = useRef(bridge.sessions)
   spendSessionsRef.current = bridge.sessions
@@ -54,7 +55,6 @@ export function AgentVisualizer() {
     edges,
     discoveries,
     fileAttention,
-    timelineEntries,
     currentTime,
     isPlaying,
     speed,
@@ -91,12 +91,12 @@ export function AgentVisualizer() {
   const [showHexGrid, setShowHexGrid] = useState(true)
   const [costsFromDashboard, setCostsFromDashboard] = useState(false)
   const allCostsTriggerRef = useRef<HTMLButtonElement>(null)
-  const [showTimeline, setShowTimeline] = useState(false)
   const [showFileAttention, setShowFileAttention] = useState(false)
   const [showTranscript, setShowTranscript] = useState(false)
   const [headerHeight, setHeaderHeight] = useState(36)
 
   const closeSpendDashboard = useCallback(() => setShowSpendDashboard(false), [])
+  const closeTimeline = useCallback(() => setShowTimeline(false), [])
   const selectSpendSession = useCallback((session: SessionInfo) => {
     const live = spendSessionsRef.current.find(row => row.id === session.id && !row.historical)
     bridge.selectSession(session.id, live ? undefined : session)
@@ -478,10 +478,11 @@ export function AgentVisualizer() {
       <SpendDashboard visible={showSpendDashboard} returnFocusRef={allCostsTriggerRef} onClose={closeSpendDashboard} onSelectSession={selectSpendSession} />
 
       <TimelinePanel
+        key={bridge.selectedSessionId ?? 'empty-timeline'}
         visible={showTimeline}
-        timelineEntries={timelineEntries}
-        currentTime={currentTime}
-        onClose={() => setShowTimeline(false)}
+        sessionId={bridge.selectedSessionId}
+        sessionLabel={selectedSessionInfo?.label ?? 'Session timeline'}
+        onClose={closeTimeline}
       />
 
       {/* Top bar: session tabs + info/controls */}
