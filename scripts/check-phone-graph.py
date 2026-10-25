@@ -28,7 +28,7 @@ const fillText = CanvasRenderingContext2D.prototype.fillText;
 CanvasRenderingContext2D.prototype.fillText = function(text, x, y, ...args) {
   if (this.canvas.isConnected && ['Root','Z','Y','X'].includes(text)) {
     const t = this.getTransform(), p = t.transformPoint(new DOMPoint(x,y));
-    const box = this.canvas.getBoundingClientRect(), dpr = devicePixelRatio;
+    const box = this.canvas.getBoundingClientRect(), dpr = this.canvas.width / box.width;
     window.__graphLabels.set(text, {x:box.left+p.x/dpr,y:box.top+p.y/dpr,
       scale:t.a/dpr,worldX:x,worldY:y,time:performance.now()});
   }
@@ -90,7 +90,7 @@ async def graph_fits_controls(page, cdp):
         assert top >= header_bottom, f'{name} is hidden behind the header: top={top:.1f}, header={header_bottom:.1f}'
         left, right = point['x'] - radius * point['scale'], point['x'] + radius * point['scale']
         assert 0 <= left <= right <= page.viewport_size['width'], f'{name} lies outside the viewport: {point}'
-        assert point['y'] + 12 * point['scale'] <= page.viewport_size['height'] - 88, f'{name} is clipped beneath the graph'
+        assert point['y'] + 12 * point['scale'] <= page.viewport_size['height'] - 88, f'{name} is clipped beneath the graph: {point}'
     assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth')
 
 

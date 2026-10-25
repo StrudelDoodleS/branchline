@@ -39,6 +39,9 @@ export function handleToolCallStart(
       currentTool: toolName,
       toolCalls: agent.toolCalls + 1
     })
+    if (!agent.isMain && agent.state === 'complete' && !ctx.skipForceSync) {
+      ctx.syncForceSimulation(state.agents, state.edges)
+    }
 
     const toolId = `tool-${agentName}-${toolName}-${currentTime}`
 
@@ -115,6 +118,9 @@ export function handleToolCallEnd(
       currentTool: undefined,
       tokensUsed: agent.tokensUsed + (tokenCost ?? 0),
     })
+    if (!agent.isMain && agent.state === 'complete' && !ctx.skipForceSync) {
+      ctx.syncForceSimulation(state.agents, state.edges)
+    }
 
     const toolState: 'error' | 'complete' = isError ? 'error' : 'complete'
     for (const [id, tc] of state.toolCalls) {

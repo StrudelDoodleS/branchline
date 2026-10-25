@@ -42,6 +42,7 @@ export function useCanvasCamera({
   const transformRef = useRef<Transform>({ x: 0, y: 0, scale: 1 })
   const userHasNavigatedRef = useRef(false)
   const targetTransformRef = useRef<Transform | null>(null)
+  const hasFittedRef = useRef(false)
   const panVelocityRef = useRef({ vx: 0, vy: 0, active: false })
 
   // Cache for computeFitTransform — avoids O(n) iteration every frame.
@@ -212,7 +213,12 @@ export function useCanvasCamera({
     // Auto-fit
     if (!userHasNavigatedRef.current && !isDragging && !pauseAutoFit) {
       const fit = computeFitTransform()
-      if (fit) targetTransformRef.current = fit
+      if (fit) {
+        if (!hasFittedRef.current) {
+          transformRef.current = fit
+          hasFittedRef.current = true
+        } else targetTransformRef.current = fit
+      }
     }
 
     // Smooth lerp toward target

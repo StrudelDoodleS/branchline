@@ -14,6 +14,7 @@ Branchline is maintained by StrudelDoodleS and derives from Agent Flow by Simon 
 - Main-session selection and a file tree for agents and nested subagents, with remembered Active/Done/All status filters.
 - Portrait layouts, stronger control contrast, keyboard-safe buttons, and reading-position preservation in activity logs.
 - Touch pan, pinch zoom and a Fit button for the graph, with nodes fitted below the header and above the phone controls; switching sessions resets the camera.
+- Graph drawing, fitting and placement use the main agent and unfinished subagents. Finished history stays available in Tree, Timeline and Costs. Replay batches produce one final layout, cold layouts settle before fitting, and cards follow their owners. Invisible nodes are culled, phone canvas density is capped at 2×, and zooming out keeps background grid work bounded.
 - Codex thread ancestry and lifecycle aggregation: a working descendant keeps its main session active, and resuming it restores completed ancestors.
 - Resumed Codex conversations are discovered in their original date directories after restart and through directory-change events; archived rollouts remain historical, and older dates do not add a recurring full-history scan.
 - Completing a reply leaves background subagents running under their own lifecycle; an explicit session end closes the full descendant tree.

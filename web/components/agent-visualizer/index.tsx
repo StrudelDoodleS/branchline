@@ -152,7 +152,9 @@ export function AgentVisualizer() {
       // Review/scrub state is per-component, not per-session: the incoming tab is restored live
       setIsReviewing(false)
       if (!bridge.isVSCode) {
-        restart()
+        // A refreshed replay replaces data for the same live session. Keep
+        // elapsed time already accumulated while the page was hidden.
+        restart(false, bridge.selectedSessionId === prevSelectedRef.current)
         bridge.flushSessionEvents(bridge.selectedSessionId)
         prevSelectedRef.current = bridge.selectedSessionId
         prevReplayVersionRef.current = bridge.sessionReplayVersion

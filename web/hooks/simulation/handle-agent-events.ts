@@ -37,7 +37,7 @@ export function handleAgentSpawn(
       reasoningEffort: 'reasoningEffort' in payload ? reasoningEffort : model && model !== existing.model ? undefined : existing.reasoningEffort,
       ...(runtime ? { runtime } : {}),
     })
-    if (!ctx.skipForceSync) setTimeout(() => ctx.syncForceSimulation(state.agents, state.edges), 0)
+    if (!ctx.skipForceSync) ctx.syncForceSimulation(state.agents, state.edges)
     return
   }
 
@@ -48,7 +48,7 @@ export function handleAgentSpawn(
       // Collect angles of existing siblings so we can avoid spawning too close
       const siblingAngles: number[] = []
       for (const a of state.agents.values()) {
-        if (a.parentId === parentId && a.id !== name) {
+        if (a.parentId === parentId && a.id !== name && a.state !== 'complete') {
           siblingAngles.push(Math.atan2(a.y - parent.y, a.x - parent.x))
         }
       }
@@ -114,7 +114,7 @@ export function handleAgentSpawn(
   state.conversations.set(name, [])
 
   if (!ctx.skipForceSync) {
-    setTimeout(() => ctx.syncForceSimulation(state.agents, state.edges), 0)
+    ctx.syncForceSimulation(state.agents, state.edges)
   }
 }
 
@@ -157,7 +157,7 @@ export function handleAgentComplete(
       state.toolCalls.set(id, { ...tool, state: 'complete', completeTime: currentTime })
     }
   }
-  if (changed && !ctx.skipForceSync) setTimeout(() => ctx.syncForceSimulation(state.agents, state.edges), 0)
+  if (changed && !ctx.skipForceSync) ctx.syncForceSimulation(state.agents, state.edges)
 }
 
 export function handlePermissionRequested(

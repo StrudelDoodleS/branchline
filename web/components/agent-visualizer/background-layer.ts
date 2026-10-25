@@ -98,7 +98,8 @@ function drawHexGrid(
   ctx.translate(transform.x, transform.y)
   ctx.scale(transform.scale, transform.scale)
 
-  const size = HEX_GRID_SIZE
+  // Keep a readable screen-space grid at low zoom instead of drawing the entire world.
+  const size = HEX_GRID_SIZE / Math.min(1, transform.scale)
   const hexHeight = size * Math.sqrt(3)
   const startX = Math.floor(-transform.x / transform.scale / (size * 1.5)) * (size * 1.5) - size * 3
   const startY = Math.floor(-transform.y / transform.scale / hexHeight) * hexHeight - hexHeight * 2

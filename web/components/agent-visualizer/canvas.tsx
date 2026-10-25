@@ -23,6 +23,7 @@ import {
 } from './canvas/index'
 import { useCanvasCamera } from '@/hooks/use-canvas-camera'
 import { useCanvasInteraction } from '@/hooks/use-canvas-interaction'
+import { projectGraphState } from '@/hooks/simulation/graph-state'
 
 interface CanvasProps {
   active?: boolean
@@ -94,9 +95,9 @@ export function AgentCanvas({
   // Simulation data (agents, particles, etc.) is synced from simulationRef
   // at the top of each draw frame, so it's always fresh even without re-renders.
   const sim = simulationRef.current
+  const graph = projectGraphState(sim)
   const makeDrawProps = (prev?: { isDragging: boolean }) => ({
-    agents: sim.agents, toolCalls: sim.toolCalls,
-    particles: sim.particles, edges: sim.edges, discoveries: sim.discoveries,
+    ...graph,
     selectedAgentId, hoveredAgentId, showStats, showHexGrid,
     showCostOverlay, selectedToolCallId, selectedDiscoveryId,
     simTime: sim.currentTime, pauseAutoFit, dimensions,
@@ -113,7 +114,7 @@ export function AgentCanvas({
     screenToCanvas, doZoomToFit, updateCamera,
   } = useCanvasCamera({
     mainCanvasRef, drawPropsRef, simTimeRef, dimensions,
-    agentCount: sim.agents.size, zoomToFitTrigger, selectedAgentId,
+    agentCount: graph.agents.size, zoomToFitTrigger, selectedAgentId,
   })
 
   // ─── Interaction ────────────────────────────────────────────────────────
@@ -140,7 +141,8 @@ export function AgentCanvas({
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
-    const dpr = window.devicePixelRatio || 1
+    // High-density phones otherwise rasterize and blur 8–12 physical pixels per CSS pixel.
+    const dpr = Math.min(window.devicePixelRatio || 1, touchDeviceRef.current ? 2 : Infinity)
     dprRef.current = dpr
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
@@ -188,11 +190,7 @@ export function AgentCanvas({
       {
         const s = simulationRef.current
         const p = drawPropsRef.current
-        p.agents = s.agents
-        p.toolCalls = s.toolCalls
-        p.particles = s.particles
-        p.edges = s.edges
-        p.discoveries = s.discoveries
+        Object.assign(p, projectGraphState(s))
         p.simTime = s.currentTime
       }
 
@@ -203,7 +201,6 @@ export function AgentCanvas({
         simTime, pauseAutoFit, dimensions, onAgentDrag,
         isDragging,
       } = drawPropsRef.current
-      const transform = transformRef.current
 
       const deltaTime = lastFrameTimeRef.current ? (timestamp - lastFrameTimeRef.current) / 1000 : ANIM_SPEED.defaultDeltaTime
       lastFrameTimeRef.current = timestamp
@@ -223,6 +220,7 @@ export function AgentCanvas({
 
       // Camera physics (inertia + auto-fit)
       updateCamera(isDragging, pauseAutoFit, deltaTime)
+      const transform = transformRef.current
 
       // Floaty agent drag
       updateDragLerp(agents, onAgentDrag)
