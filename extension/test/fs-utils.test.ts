@@ -12,7 +12,7 @@ import assert from 'node:assert/strict'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { readNewFileLines } from '../src/fs-utils'
+import { readNewFileLines, readNewFileLineBatches } from '../src/fs-utils'
 
 describe('readNewFileLines', () => {
   let dir: string
@@ -100,5 +100,48 @@ describe('readNewFileLines', () => {
 
   it('returns null when the file does not exist', () => {
     assert.equal(readNewFileLines(path.join(dir, 'missing.jsonl'), 0), null)
+  })
+
+  it('streams large catch-up reads in bounded batches rather than one giant string', () => {
+    fs.writeFileSync(file, 'record\n'.repeat(300000))
+    const iterator = readNewFileLineBatches(file, 0)
+    const first = iterator.next()
+    assert.equal(first.done, false)
+    assert.ok(first.value!.newSize < fs.statSync(file).size)
+    let count = first.value!.lines.length
+    let last = first.value!
+    for (const batch of iterator) { count += batch.lines.length; last = batch }
+    assert.equal(count, 300000)
+    assert.equal(last.newSize, fs.statSync(file).size)
+    assert.equal(last.tail, '')
+  })
+
+  it('preserves UTF-8, CRLF and partial lines across streaming boundaries and appends', () => {
+    fs.writeFileSync(file, 'first\r\nİstanbul 🌳\npartial')
+    const batches = [...readNewFileLineBatches(file, 0, '', 7)]
+    assert.deepEqual(batches.flatMap(batch => batch.lines), ['first', 'İstanbul 🌳'])
+    const last = batches.at(-1)!
+    assert.equal(last.tail, 'partial')
+    fs.appendFileSync(file, '-done\nlast\n')
+    const appended = [...readNewFileLineBatches(file, last.newSize, last.tail, 7)]
+    assert.deepEqual(appended.flatMap(batch => batch.lines), ['partial-done', 'last'])
+    assert.equal(appended.at(-1)!.tail, '')
+  })
+
+  it('bounds a catch-up snapshot even if more data arrives while consuming it', () => {
+    fs.writeFileSync(file, 'one\ntwo\n')
+    const iterator = readNewFileLineBatches(file, 0, '', 4)
+    assert.deepEqual(iterator.next().value!.lines, ['one'])
+    fs.appendFileSync(file, 'three\n')
+    const rest = [...iterator]
+    assert.deepEqual(rest.flatMap(batch => batch.lines), ['two'])
+    assert.equal(rest.at(-1)!.newSize, 8)
+  })
+
+  it('handles missing, unchanged and truncated streaming files', () => {
+    assert.deepEqual([...readNewFileLineBatches(path.join(dir, 'missing.jsonl'), 0)], [])
+    fs.writeFileSync(file, 'small\n')
+    assert.deepEqual([...readNewFileLineBatches(file, 6)], [])
+    assert.deepEqual([...readNewFileLineBatches(file, 100, 'old')], [{ lines: [], newSize: 0, tail: '' }])
   })
 })

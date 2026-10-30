@@ -8,6 +8,60 @@ import { createRequire } from 'node:module'
 import { buildSync } from 'esbuild'
 import type { SessionWatcher } from '../extension/src/session-watcher'
 import type { AgentEvent } from '../extension/src/protocol'
+import { createEmptyState } from '../web/hooks/simulation/types'
+import { SessionReplayStore } from './session-replay'
+
+test('native finished markers leave exactly five of 22 workers active across attach and replay', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'branchline-finished-metadata-'))
+  const watcherBundle = path.join(directory, 'watcher.cjs')
+  const simulationBundle = path.join(directory, 'simulation.cjs')
+  buildSync({ entryPoints: [path.resolve('extension/src/session-watcher.ts')], outfile: watcherBundle,
+    bundle: true, platform: 'node', format: 'cjs', alias: { vscode: path.resolve('scripts/vscode-shim.js') } })
+  buildSync({ entryPoints: [path.resolve('web/hooks/simulation/process-event.ts')], outfile: simulationBundle,
+    bundle: true, platform: 'node', format: 'cjs', tsconfig: path.resolve('web/tsconfig.json') })
+  const require = createRequire(import.meta.url)
+  const { SessionWatcher: Watcher } = require(watcherBundle)
+  const { processEvent } = require(simulationBundle) as typeof import('../web/hooks/simulation/process-event')
+  const watcher: SessionWatcher = new Watcher()
+  const id = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa'
+  const main = path.join(directory, id + '.jsonl')
+  const subdir = path.join(directory, id, 'subagents')
+  fs.mkdirSync(subdir, { recursive: true })
+  fs.writeFileSync(main, JSON.stringify({ type: 'user', message: { role: 'user', content: 'Run the workers' } }) + '\n')
+  for (let i = 0; i < 22; i++) {
+    const file = path.join(subdir, `agent-${i}.jsonl`)
+    fs.writeFileSync(file.replace('.jsonl', '.meta.json'), JSON.stringify({ description: `Worker ${i}`, ...(i < 17 ? { finished: true } : {}) }))
+    fs.writeFileSync(file, JSON.stringify({ type: 'assistant', uuid: `response-${i}`, message: {
+      id: `response-${i}`, role: 'assistant', model: 'claude-opus-5-5', stop_reason: 'tool_use',
+      usage: { input_tokens: 10, output_tokens: 10 }, content: [{ type: 'tool_use', name: 'Bash', id: `tool-${i}`, input: { command: 'work' } }],
+    } }) + '\n')
+  }
+  const store = new SessionReplayStore(2)
+  const events: AgentEvent[] = []
+  watcher.onEvent(event => { events.push(event); store.push(event) })
+  const context = { skipForceSync: true, blockIdCounter: { current: 0 }, getContextWindowSize: () => 1000000,
+    findToolSlot: () => ({ x: 0, y: 0 }), syncForceSimulation: () => {} }
+  function activeCount(input: AgentEvent[]) {
+    let state = createEmptyState()
+    for (const event of input) state = processEvent({ ...event, type: event.type as import('../web/lib/agent-types').SimulationEvent['type'] }, state, context)
+    assert.equal(state.agents.size, 23, 'finished history and its usage must stay available')
+    assert.equal([...state.agents.values()].reduce((total, agent) => total + (agent.usage?.totalTokens ?? 0), 0), 440, 'client replay must preserve child usage')
+    return [...state.agents.values()].filter(agent => !agent.isMain && agent.state !== 'complete').length
+  }
+  try {
+    ;(watcher as unknown as { watchSession(id: string, file: string): void }).watchSession(id, main)
+    assert.equal(activeCount(events), 5)
+    assert.equal(activeCount(store.get(id)!.events), 5)
+    assert.equal(watcher.getCostHistory(id, { groupBy: 'agent' })!.groups?.length, 22)
+    const beforeReplay = events.length
+    watcher.replaySessionStart([id])
+    assert.equal(activeCount(events.slice(beforeReplay)), 5)
+    assert.equal(activeCount(store.get(id)!.events), 5)
+  } finally {
+    watcher.dispose()
+    fs.rmSync(directory, { recursive: true, force: true })
+  }
+})
 
 for (const finishSource of ['transcript', 'notification', 'recorded notification', 'resumed child', 'relaunched child', 'late discovery', 'live relaunch']) {
 test(`Claude lifecycle restores and finishes correctly via ${finishSource}`, async (context) => {

@@ -68,8 +68,9 @@ function trackTurn(entry: TranscriptEntry, state: SubagentState): 'active' | 'co
 }
 
 function completeSubagent(delegate: SubagentWatcherDelegate, state: SubagentState, sessionId: string): void {
-  if (state.completed) return
+  const alreadyCompleted = state.completed
   markSubagentCompleted(state)
+  if (alreadyCompleted) return
   delegate.emit({ time: delegate.elapsed(sessionId), type: 'agent_complete', payload: { name: state.agentName } }, sessionId)
 }
 
@@ -79,18 +80,26 @@ export interface SubagentWatcherDelegate extends PermissionDetectionDelegate {
 }
 
 /**
- * Read the .meta.json sidecar file to resolve the subagent's name.
- * Falls back to generateSubagentFallbackName if the meta file is missing or unreadable.
+ * Read native identity/completion metadata, preserving the last valid state
+ * across partial writes and caching JSON until the sidecar changes.
  */
-function resolveNameFromMeta(jsonlPath: string, fallbackIndex: number): string {
+function readMetadata(jsonlPath: string, state?: SubagentState): SubagentState['metadata'] {
   const metaPath = jsonlPath.replace(/\.jsonl$/, '.meta.json')
   try {
+    const stat = fs.statSync(metaPath)
+    const signature = `${stat.ino}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.size}`
+    if (state?.metadata?.signature === signature) return state.metadata
     const raw = fs.readFileSync(metaPath, 'utf-8')
-    const meta = JSON.parse(raw) as Record<string, unknown>
-    const name = resolveSubagentChildName(meta)
-    if (name && name !== 'subagent') return name
+    const meta: unknown = JSON.parse(raw)
+    if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return state?.metadata
+    const record = meta as Record<string, unknown>
+    const metadata = { signature, name: resolveSubagentChildName(record), finished: record.finished === true,
+      toolUseId: typeof record.toolUseId === 'string' ? record.toolUseId : undefined }
+    if (state) state.metadata = metadata
+    return metadata
   } catch { /* meta file may not exist for older Claude Code versions */ }
-  return generateSubagentFallbackName('', fallbackIndex)
+  // An atomic replacement or partial write must not undo a known completion.
+  return state?.metadata
 }
 
 /** Scan the subagents directory for new JSONL files and start tailing them */
@@ -105,7 +114,11 @@ export function scanSubagentsDir(
   // Start watching the directory itself once it exists
   if (!session.subagentsDirWatcher && fs.existsSync(session.subagentsDir)) {
     try {
-      session.subagentsDirWatcher = fs.watch(session.subagentsDir, () => {
+      session.subagentsDirWatcher = fs.watch(session.subagentsDir, (_event, filename) => {
+        if (filename?.toString().endsWith('.meta.json')) {
+          const jsonl = path.join(session.subagentsDir!, filename.toString().replace(/\.meta\.json$/, '.jsonl'))
+          if (session.subagentWatchers.has(jsonl)) readSubagentNewLines(delegate, parser, jsonl, sessionId)
+        }
         scanSubagentsDir(delegate, parser, sessionId)
       })
     } catch (err) { log.debug('Subagent dir watch failed:', err) }
@@ -135,7 +148,18 @@ function startWatchingSubagentFile(
   if (!session) return
 
   // Resolve name from the meta file (deterministic, no queue race)
-  const agentName = resolveNameFromMeta(filePath, session.subagentWatchers.size + 1)
+  const metadata = readMetadata(filePath)
+  // Claude creates the transcript before its sidecar. Existing discovery/poll
+  // passes retry shortly; legacy files without sidecars still get a fallback.
+  const pending = session.pendingSubagentMetadata ??= new Map()
+  if (!metadata) {
+    const firstSeen = pending.get(filePath) ?? Math.min(Date.now(), fs.statSync(filePath).mtimeMs)
+    pending.set(filePath, firstSeen)
+    if (Date.now() - firstSeen < 2000) return
+  }
+  pending.delete(filePath)
+  const agentName = metadata?.name && metadata.name !== 'subagent'
+    ? metadata.name : generateSubagentFallbackName('', session.subagentWatchers.size + 1)
   log.info(`Tailing subagent: ${path.basename(filePath)} as "${agentName}" (session ${sessionId.slice(0, SESSION_ID_DISPLAY)})`)
 
   const state: SubagentState = {
@@ -147,6 +171,7 @@ function startWatchingSubagentFile(
     permissionTimer: null,
     permissionEmitted: false,
     spawnEmitted: false,
+    metadata,
   }
   session.subagentWatchers.set(filePath, state)
 
@@ -187,6 +212,7 @@ function startWatchingSubagentFile(
 
   const parentCompletion = session.subagentCompletions?.get(agentName)
   if (parentCompletion !== undefined && latestActivityTime <= parentCompletion) finishedTurn = true
+  if (metadata?.finished) finishedTurn = true
 
   // Restore active and historical identities before their usage/final status.
   const alreadySpawned = session.spawnedSubagents.has(agentName)
@@ -231,19 +257,35 @@ export function readSubagentNewLines(
   const state = session.subagentWatchers.get(filePath)
   if (!state) return
 
+  const metadata = readMetadata(filePath, state)
   const result = readNewFileLines(filePath, state.fileSize, state.fileTail)
-  if (!result) return
+  if (!result) {
+    if (metadata?.finished && state.spawnEmitted) completeSubagent(delegate, state, sessionId)
+    return
+  }
   state.fileSize = result.newSize
   state.fileTail = result.tail
 
   const inline = session.inlineProgressAgents.has(state.agentName)
   let hasConversation = false
+  let usageOnly = false
   for (const line of result.lines) {
     let entry: unknown
     try { entry = JSON.parse(line) } catch { continue }
     if (!isConversationEntry(entry)) continue
     hasConversation = true
     const turn = trackTurn(entry, state)
+    if (metadata?.finished || state.completed && turn === null) {
+      // Terminal native state and replayed old turns still contribute final
+      // usage/settings, but cannot restart tools or permission timers.
+      usageOnly = true
+      parser.recordAssistantUsage(entry, state.agentName, session)
+      if (parser.recordAssistantSettings(entry, state.agentName, session)) {
+        delegate.emit({ time: delegate.elapsed(sessionId), type: 'model_detected',
+          payload: { agent: state.agentName, ...modelSettingsFields(session, state.agentName) } }, sessionId)
+      }
+      continue
+    }
     // File metadata and repeated final counters must never revive an agent.
     if (state.completed && turn === 'active') {
       state.completed = false
@@ -271,7 +313,8 @@ export function readSubagentNewLines(
     }
     if (turn === 'complete') completeSubagent(delegate, state, sessionId)
   }
-  if (inline && hasConversation && session.usageLedger?.snapshot(state.agentName)) {
+  if (metadata?.finished && state.spawnEmitted) completeSubagent(delegate, state, sessionId)
+  if ((inline || usageOnly) && hasConversation && session.usageLedger?.snapshot(state.agentName)) {
     delegate.emit({ time: delegate.elapsed(sessionId), type: 'context_update', payload: claudeContextPayload(session, state.agentName) }, sessionId)
   }
 

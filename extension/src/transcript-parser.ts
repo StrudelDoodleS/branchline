@@ -592,6 +592,22 @@ export class TranscriptParser {
       }
     }
 
+    const session = sessionId ? this.delegate.getSession(sessionId) : undefined
+    const finished = [...(session?.subagentWatchers.values() ?? [])].some(child =>
+      child.agentName === subState.agentName && child.metadata?.finished
+      && (!child.metadata.toolUseId || child.metadata.toolUseId === parentToolUseID))
+    if (finished && session) {
+      // Inline updates may trail the native finish marker. Keep late billing
+      // and settings, but don't replay tools that would reopen this child.
+      this.recordAssistantUsage(innerEntry, subState.agentName, session)
+      if (this.recordAssistantSettings(innerEntry, subState.agentName, session)) {
+        this.delegate.emit({ time: this.delegate.elapsed(sessionId), type: 'model_detected',
+          payload: { agent: subState.agentName, ...modelSettingsFields(session, subState.agentName) } }, sessionId)
+      }
+      this.delegate.emitContextUpdate(subState.agentName, session, sessionId)
+      return
+    }
+
     // Re-wrap as a JSONL line and process through the normal pipeline
     const innerLine = JSON.stringify(innerEntry)
     this.processTranscriptLine(innerLine, subState.agentName, subState.pending, subState.seen, sessionId, subState.seenMessages)

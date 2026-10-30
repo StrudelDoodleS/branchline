@@ -172,6 +172,8 @@ export interface PendingToolCall {
 
 export interface SubagentState {
   completed?: boolean
+  /** Native sidecar state, cached until the file changes; absence is unknown. */
+  metadata?: { signature: string; name: string; finished: boolean; toolUseId?: string }
   turn?: {
     responseId?: string
     finished: boolean
@@ -215,6 +217,8 @@ export interface WatchedSession {
   lastActivityTime: number
   inactivityTimer: NodeJS.Timeout | null
   subagentWatchers: Map<string, SubagentState>
+  /** First discovery time for transcripts whose sidecar is still being written. */
+  pendingSubagentMetadata?: Map<string, number>
   /** Names of subagents already spawned (by transcript parser or file watcher) — prevents duplicate spawns */
   spawnedSubagents: Set<string>
   /** Parent completion times restored on attach; newer child activity wins. */

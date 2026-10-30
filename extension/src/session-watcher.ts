@@ -124,13 +124,15 @@ export class SessionWatcher implements AgentSessionWatcher {
           ...modelSettingsFields(session, ORCHESTRATOR_NAME),
         },
       }, sessionId)
+      this.emitContextUpdate(ORCHESTRATOR_NAME, session, sessionId)
 
       for (const [, sub] of session.subagentWatchers) {
         if (session.spawnedSubagents.has(sub.agentName)) {
           this.emit({ time: 0, type: 'subagent_dispatch', payload: { parent: ORCHESTRATOR_NAME, child: sub.agentName, task: sub.agentName } }, sessionId)
           this.emit({ time: 0, type: 'agent_spawn', payload: { name: sub.agentName, parent: ORCHESTRATOR_NAME, task: sub.agentName, ...modelSettingsFields(session, sub.agentName) } }, sessionId)
+          this.emitContextUpdate(sub.agentName, session, sessionId)
+          if (sub.completed) this.emit({ time: 0, type: 'agent_complete', payload: { name: sub.agentName } }, sessionId)
         }
-        sub.spawnEmitted = false
       }
 
       for (const agent of session.modelDetectedAgents.keys()) {

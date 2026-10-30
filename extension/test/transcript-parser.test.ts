@@ -114,13 +114,13 @@ describe('subagent transcript lifecycle', () => {
   const resume = { type: 'user', uuid: 'resume', message: { role: 'user', content: 'Please continue' } }
   const metadata = { type: 'api-request-blob', message: { content: [{ type: 'tool_use', id: 'blob-tool', name: 'Bash' }] } }
 
-  function fixture(entries: unknown[], historical = false, reserved = false) {
+  function fixture(entries: unknown[], historical = false, reserved = false, meta: Record<string, unknown> | null = {}) {
     const { session, parser, events } = setup()
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'branchline-child-lifecycle-'))
     const file = path.join(directory, 'agent-test.jsonl')
     fs.writeFileSync(file, entries.map(entry => JSON.stringify(entry)).join('\n') + '\n')
     if (historical) fs.utimesSync(file, new Date(0), new Date(0))
-    fs.writeFileSync(file.replace('.jsonl', '.meta.json'), JSON.stringify({ description: 'Researcher' }))
+    if (meta) fs.writeFileSync(file.replace('.jsonl', '.meta.json'), JSON.stringify({ description: 'Researcher', ...meta }))
     session.subagentsDir = directory
     if (reserved) session.spawnedSubagents.add('Researcher')
     const delegate = { emit: (event: AgentEvent) => events.push(event), elapsed: () => 0,
@@ -137,7 +137,112 @@ describe('subagent transcript lifecycle', () => {
       }
       fs.rmSync(directory, { recursive: true, force: true })
     }
-    return { session, events, file, read, append, lifecycle, close }
+    const writeMeta = (meta: Record<string, unknown>) => fs.writeFileSync(file.replace('.jsonl', '.meta.json'), JSON.stringify({ description: 'Researcher', ...meta }))
+    return { session, parser, events, file, read, append, lifecycle, close, writeMeta }
+  }
+
+  it('restores native finished metadata despite an unfinished transcript and unmatched tool', () => {
+    const f = fixture([pending], false, false, { finished: true })
+    try {
+      assert.deepEqual(f.lifecycle(), ['agent_spawn', 'agent_complete'])
+      assert.equal(f.session.subagentWatchers.get(f.file)?.completed, true)
+      assert.equal(claudeContextPayload(f.session, 'Researcher').usage?.totalTokens, 20)
+    } finally { f.close() }
+  })
+
+  it('finishes on a metadata-only update without waiting for transcript activity', () => {
+    const f = fixture([pending])
+    try {
+      const size = fs.statSync(f.file).size
+      f.writeMeta({ finished: true })
+      f.read()
+      assert.equal(fs.statSync(f.file).size, size)
+      assert.deepEqual(f.lifecycle(), ['agent_spawn', 'agent_complete'])
+      assert.equal(f.session.subagentWatchers.get(f.file)?.permissionTimer, null)
+      f.read()
+      assert.deepEqual(f.lifecycle(), ['agent_spawn', 'agent_complete'], 'unchanged metadata must not repeatedly emit completion')
+    } finally { f.close() }
+  })
+
+  it('keeps a metadata-finished agent done while accepting late usage and model settings', () => {
+    const f = fixture([pending], false, false, { finished: true })
+    try {
+      f.append({ ...response('late', 'tool_use', [{ type: 'tool_use', id: 'late-tool', name: 'Bash', input: { command: 'old work' } }]), perTurnEffort: 'high' })
+      assert.deepEqual(f.lifecycle(), ['agent_spawn', 'agent_complete'])
+      assert.equal(ofType(f.events, 'tool_call_start').length, 0)
+      assert.equal(claudeContextPayload(f.session, 'Researcher').usage?.totalTokens, 40)
+      assert.equal(ofType(f.events, 'model_detected').at(-1)?.payload.reasoningEffort, 'high')
+    } finally { f.close() }
+  })
+
+  it('allows a genuine new turn after Claude clears the finished marker', () => {
+    const f = fixture([pending], false, false, { finished: true })
+    try {
+      f.writeMeta({})
+      f.append(resume)
+      assert.deepEqual(f.lifecycle(), ['agent_spawn', 'agent_complete', 'agent_spawn'])
+      f.append(response('resumed-finish', 'end_turn'))
+      assert.deepEqual(f.lifecycle(), ['agent_spawn', 'agent_complete', 'agent_spawn', 'agent_complete'])
+    } finally { f.close() }
+  })
+
+  it('ignores malformed metadata without finishing or restarting a quiet worker', () => {
+    const f = fixture([pending])
+    try {
+      fs.writeFileSync(f.file.replace('.jsonl', '.meta.json'), '{"finished":')
+      f.read()
+      assert.deepEqual(f.lifecycle(), ['agent_spawn'])
+    } finally { f.close() }
+  })
+
+  it('waits for a fresh transcript sidecar instead of inventing a second identity', () => {
+    const f = fixture([pending], false, false, null)
+    try {
+      assert.deepEqual(f.lifecycle(), [])
+      f.writeMeta({})
+      scanSubagentsDir({ emit: event => f.events.push(event), elapsed: () => 0,
+        getSession: () => f.session, getLastActivityTime: () => 0, resetInactivityTimer: () => {} }, f.parser, SESSION_ID)
+      assert.deepEqual(f.events.filter(event => event.type === 'agent_spawn').map(event => event.payload.name), ['Researcher'])
+    } finally { f.close() }
+  })
+
+  it('still discovers legacy transcripts that have no sidecar', () => {
+    const f = fixture([pending], true, false, null)
+    try { assert.deepEqual(f.lifecycle(), ['agent_spawn']) }
+    finally { f.close() }
+  })
+
+  it('bounds discovery delay even when a legacy transcript keeps being written', context => {
+    context.mock.timers.enable({ apis: ['Date'], now: Date.now() })
+    const f = fixture([pending], false, false, null)
+    const scan = () => scanSubagentsDir({ emit: event => f.events.push(event), elapsed: () => 0,
+      getSession: () => f.session, getLastActivityTime: () => 0, resetInactivityTimer: () => {} }, f.parser, SESSION_ID)
+    try {
+      assert.deepEqual(f.lifecycle(), [])
+      context.mock.timers.tick(1000)
+      fs.utimesSync(f.file, new Date(Date.now()), new Date(Date.now()))
+      scan()
+      context.mock.timers.tick(1500)
+      fs.utimesSync(f.file, new Date(Date.now()), new Date(Date.now()))
+      scan()
+      assert.deepEqual(f.lifecycle(), ['agent_spawn'])
+    } finally { f.close() }
+  })
+
+  for (const launch of ['old-launch', 'new-launch']) {
+    it(`honours native finish for matching inline progress, without suppressing ${launch}`, () => {
+      const f = fixture([pending], false, false, { finished: true, toolUseId: 'old-launch' })
+      const feed = (entry: unknown) => f.parser.processTranscriptLine(JSON.stringify(entry), 'orchestrator',
+        f.session.pendingToolCalls, f.session.seenToolUseIds, SESSION_ID, f.session.seenMessageHashes)
+      try {
+        feed(agentToolUse(launch, 'Researcher'))
+        feed({ type: 'progress', parentToolUseID: launch, data: { type: 'agent_progress',
+          message: response('inline-late', 'tool_use', [{ type: 'tool_use', name: 'Bash', id: 'inline-tool', input: { command: 'work' } }]) } })
+        const tools = f.events.filter(event => event.type === 'tool_call_start' && event.payload.agent === 'Researcher')
+        assert.equal(tools.length, launch === 'old-launch' ? 0 : 1)
+        assert.equal(claudeContextPayload(f.session, 'Researcher').usage?.totalTokens, 40)
+      } finally { f.close() }
+    })
   }
 
   it('restores a just-finished turn as done despite old unmatched tools and request blobs', () => {

@@ -20,7 +20,7 @@ import {
   ACTIVE_SESSION_AGE_S, INACTIVITY_TIMEOUT_MS, ORCHESTRATOR_NAME,
   POLL_FALLBACK_MS, SCAN_INTERVAL_MS, SESSION_ID_DISPLAY,
 } from './constants'
-import { readNewFileLines } from './fs-utils'
+import { readNewFileLineBatches } from './fs-utils'
 import { createLogger } from './logger'
 import {
   CodexRolloutParser, CodexRolloutState, createCodexRolloutState,
@@ -595,40 +595,43 @@ export class CodexSessionWatcher implements AgentSessionWatcher {
 
     this.refreshSessionTitle(session)
 
-    const result = readNewFileLines(session.filePath, session.fileSize, session.fileTail)
-    if (!result) return
-    session.fileSize = result.newSize
-    session.fileTail = result.tail
+    let readAny = false
     let hasActivity = false
-    for (const line of result.lines) {
-      try {
-        const record = JSON.parse(line) as { type?: string; payload?: { type?: string; role?: string } }
-        const terminal = record.type === 'event_msg' && (record.payload?.type === 'task_complete' || record.payload?.type === 'turn_aborted')
-        const started = record.type === 'event_msg' && record.payload?.type === 'task_started'
-        if (started) session.taskActive = true
-        if (terminal) session.taskActive = false
-        // Counters, titles, session metadata and duplicate lifecycle mirrors
-        // can arrive after completion. Only turn work can revive the session.
-        const work = started || session.taskActive !== false && (
-          record.type === 'response_item' && record.payload?.role !== 'system' && record.payload?.role !== 'developer'
-          || record.type === 'compacted'
-          || record.type === 'event_msg' && record.payload?.type === 'agent_reasoning'
-          || session.taskActive === undefined && (record.type === 'token_usage_record'
-            || record.type === 'event_msg' && record.payload?.type === 'token_count'))
-        if (work || terminal) hasActivity = true
-        if (work && session.sessionCompleted && !restoring) {
-          const root = this.rootSession(sessionId)!
-          const groupWasActive = this.groupIsActive(root.sessionId)
-          session.sessionCompleted = false
-          this.reviveInactiveAncestors(session)
-          this.emitSpawn(session)
-          if (!groupWasActive) this._onSessionLifecycle.fire({ type: 'started', sessionId: root.sessionId, label: root.label })
+    for (const result of readNewFileLineBatches(session.filePath, session.fileSize, session.fileTail)) {
+      readAny = true
+      session.fileSize = result.newSize
+      session.fileTail = result.tail
+      for (const line of result.lines) {
+        try {
+          const record = JSON.parse(line) as { type?: string; payload?: { type?: string; role?: string } }
+          const terminal = record.type === 'event_msg' && (record.payload?.type === 'task_complete' || record.payload?.type === 'turn_aborted')
+          const started = record.type === 'event_msg' && record.payload?.type === 'task_started'
+          if (started) session.taskActive = true
+          if (terminal) session.taskActive = false
+          // Counters, titles, session metadata and duplicate lifecycle mirrors
+          // can arrive after completion. Only turn work can revive the session.
+          const work = started || session.taskActive !== false && (
+            record.type === 'response_item' && record.payload?.role !== 'system' && record.payload?.role !== 'developer'
+            || record.type === 'compacted'
+            || record.type === 'event_msg' && record.payload?.type === 'agent_reasoning'
+            || session.taskActive === undefined && (record.type === 'token_usage_record'
+              || record.type === 'event_msg' && record.payload?.type === 'token_count'))
+          if (work || terminal) hasActivity = true
+          if (work && session.sessionCompleted && !restoring) {
+            const root = this.rootSession(sessionId)!
+            const groupWasActive = this.groupIsActive(root.sessionId)
+            session.sessionCompleted = false
+            this.reviveInactiveAncestors(session)
+            this.emitSpawn(session)
+            if (!groupWasActive) this._onSessionLifecycle.fire({ type: 'started', sessionId: root.sessionId, label: root.label })
+          }
+          session.parser.processLine(line, session.rolloutState)
+          if (terminal) session.rolloutState.pendingToolCalls.clear()
         }
-        session.parser.processLine(line, session.rolloutState)
-        if (terminal) session.rolloutState.pendingToolCalls.clear()
+        catch (err) { log.debug('Parser threw on line:', err) }
       }
-      catch (err) { log.debug('Parser threw on line:', err) }
     }
+    if (!readAny) return
     if (hasActivity && !restoring) session.lastActivityTime = Date.now()
     if (session.taskActive === false) this.completeSession(session)
     else if (hasActivity && !restoring) this.resetInactivityTimer(sessionId)
